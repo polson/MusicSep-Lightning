@@ -27,18 +27,18 @@ model:
 # Paths for different modes
 paths:
   # Where to save checkpoint files
-  checkpoints: "/home/phil/AudioSep/checkpoints"
+  checkpoints: "/home/user/AudioSep/checkpoints"
 
   # Dataset location
-  dataset: "/home/phil/AudioSep/datasets/musdb18hq"
+  dataset: "/home/user/AudioSep/datasets/musdb18hq"
 
   # Optional: Where to save validation outputs for listening
-  #  validation: "/home/phil/AudioSep/validation"
+  # validation: "/home/user/AudioSep/validation"
 
   # Optional: Resume training from a checkpoint
-  #  resume_from: "/home/user/AudioSep/checkpoints/audio-separation-epoch=10-val_avg_sdr=6.4997.ckpt"
+  # resume_from: "/home/user/AudioSep/checkpoints/audio-separation-epoch=10-val_avg_sdr=6.4997.ckpt"
 
-  # Optional: Inference mode input folder
+  # Optional: Inference mode input folder, this must be used with resume_from option
   # inference_input: "/home/user/AudioSep/datasets/musdb18hq_flac/test"
 
 # Logging and debugging
