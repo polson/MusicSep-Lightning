@@ -1,0 +1,55 @@
+# Mode: train or inference
+mode: train
+
+# Training settings
+training:
+  batch_size: 8
+  duration: 8
+  num_steps: 1000
+  max_epochs: 1000
+  optimizer: prodigy
+  learning_rate: 1
+  seed: 89
+  grad_accum: 1
+  grad_clip: 1.0
+  augment: true
+  target_sources:
+    - vocals
+  precision: bf16-mixed
+
+#Model specific settings
+model:
+  layers: 1
+  splits: 64
+  n_fft: 2048
+  hop_length: 512
+
+# Paths for different modes
+paths:
+  # Where to save checkpoint files
+  checkpoints: "/home/phil/AudioSep/checkpoints"
+
+  # Dataset location
+  dataset: "/home/phil/AudioSep/datasets/musdb18hq"
+
+  # Optional: Where to save validation outputs for listening
+  #  validation: "/home/phil/AudioSep/validation"
+
+  # Optional: Resume training from a checkpoint
+  #  resume_from: "/home/user/AudioSep/checkpoints/audio-separation-epoch=10-val_avg_sdr=6.4997.ckpt"
+
+  # Optional: Inference mode input folder
+  # inference_input: "/home/user/AudioSep/datasets/musdb18hq_flac/test"
+
+# Logging and debugging
+logging:
+  wandb:
+    enabled: false
+    save_code: true # Uploads all code in the model directory to wandb
+  validate_every: 5 # Validation loss / sdr metric interval (0 to disable)
+  debug_every: 1 # Debug visualization interval (0 to disable)
+
+inference:
+  batch_size: 4
+  duration: 8
+
