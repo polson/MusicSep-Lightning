@@ -18,12 +18,15 @@ First, create and activate a Python virtual environment:
 ```bash
 # Create virtual environment
 python -m venv musicsep-env
+
 # Activate virtual environment
 # On Windows:
 musicsep-env\Scripts\activate
+
 # On macOS/Linux:
 source musicsep-env/bin/activate
 ```
+
 ### 2. Install Dependencies
 Install all required packages:
 ```bash
@@ -37,18 +40,25 @@ dataset/
 ├── train/
 └── test/
 ```
-
 Both the `train` and `test` folders must contain audio files in **WAV format** corresponding to the stems you select in the config's `target_sources` parameter.
 
 ## Usage
-
 ### Training
 To start training the model:
 ```bash
 python main.py
 ```
+
 This will start training the model defined in `./model/magsep/model.py` using the configuration from
 `./config/config.yaml`.
+
+#### Suppressing Warnings
+During training, you may encounter various warnings from PyTorch, Lightning, or other dependencies. To suppress these warnings for cleaner output, you can run:
+```bash
+python -W ignore main.py
+```
+
+This will hide most warning messages while still displaying important error messages and training progress.
 
 ### Inference
 To run inference on audio files:
@@ -76,6 +86,12 @@ To run inference on audio files:
    ```
 
 The inference will process audio files from the `inference_input` directory and separate them into the stems specified in `target_sources`.
+
+#### Suppressing Warnings During Inference
+Similarly, you can suppress warnings during inference:
+```bash
+python -W ignore main.py
+```
 
 ## License
 MIT License - see [LICENSE](./LICENSE) for details.
