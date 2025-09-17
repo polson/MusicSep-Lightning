@@ -45,7 +45,7 @@ To start training the model:
 python main.py
 ```
 
-This will start training the model defined in `./models/magsep/model.py` using the configuration from
+This will start training the model defined in `./model/magsep/model.py` using the configuration from
 `./config/config.yaml`.
 
 ## License
