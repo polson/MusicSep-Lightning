@@ -5,6 +5,8 @@ solution for music source separation using deep learning techniques.
 ## Features
 - PyTorch Lightning integration for scalable training
 - Live visualization of training progress
+- Smart checkpoint loading with parameter matching
+- Validation loss and SDR statistics while training
 - Toolkit of `nn.Module`s for more easily building your own models
 - Sample model in ./model/magsep/model.py
 
