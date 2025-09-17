@@ -52,13 +52,7 @@ python main.py
 This will start training the model defined in `./model/magsep/model.py` using the configuration from
 `./config/config.yaml`.
 
-#### Suppressing Warnings
-During training, you may encounter various warnings from PyTorch, Lightning, or other dependencies. To suppress these warnings for cleaner output, you can run:
-```bash
-python -W ignore main.py
-```
 
-This will hide most warning messages while still displaying important error messages and training progress.
 
 ### Inference
 To run inference on audio files:
@@ -87,8 +81,8 @@ To run inference on audio files:
 
 The inference will process audio files from the `inference_input` directory and separate them into the stems specified in `target_sources`.
 
-#### Suppressing Warnings During Inference
-Similarly, you can suppress warnings during inference:
+## Suppressing Warnings
+If you encounter verbose warning messages during training or inference, you can suppress them by using:
 ```bash
 python -W ignore main.py
 ```
