@@ -1,14 +1,11 @@
 # MusicSep-Lightning
-A complete PyTorch Lightning toolkit for separating musical stems from audio tracks. This project provides an end-to-end
-solution for music source separation using deep learning techniques.
+A PyTorch Lightning toolkit for audio separation
 
 ## Features
-- PyTorch Lightning integration for scalable training
 - Live visualization of training progress
 - Smart checkpoint loading with parameter matching
 - Validation loss and SDR statistics while training
 - Toolkit of `nn.Module`s for more easily building your own models
-- Sample model in ./model/magsep/model.py
 
 ## Requirements
 - Python 3.8+
@@ -42,7 +39,7 @@ dataset/
 ├── train/
 └── test/
 ```
-Both the `train` and `test` folders must contain audio files in **WAV format** corresponding to the stems you select in the config's `target_sources` parameter.
+Both the `train` and `test` folders must contain audio files in WAV format corresponding to the stems you select in the config's `target_sources` parameter.
 
 ## Usage
 ### Training
@@ -51,8 +48,8 @@ To start training the model:
 python main.py
 ```
 
-This will start training the model defined in `./model/magsep/model.py` using the configuration from
-`./config/config.yaml`.
+This will start training the model defined in `model/magsep/model.py` using the configuration from
+`config/config.yaml`.
 
 
 
