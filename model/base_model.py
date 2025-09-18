@@ -4,7 +4,7 @@ import torch.nn as nn
 from einops.layers.torch import Rearrange
 
 from loss import LossFactory, LossType
-from modules.functional import STFTOnly, Condition, ToMagnitudeOnly, SideEffect
+from modules.functional import ToSTFT, Condition, ToMagnitude, SideEffect
 from modules.seq import Seq
 from modules.visualize import VisualizationHook
 
@@ -43,17 +43,17 @@ class BaseModel(nn.Module, ABC):
         mixture = x
         x = self.forward(x)
         self.visualize("mixture", Seq(
-            STFTOnly(),
-            ToMagnitudeOnly(),
+            ToSTFT(),
+            ToMagnitude(),
         ))(mixture)
         self.visualize("progress", Seq(
             Rearrange("b n c t -> (b n) c t"),
-            STFTOnly(),
-            ToMagnitudeOnly(),
+            ToSTFT(),
+            ToMagnitude(),
         ))(x)
         self.visualize("target", Seq(
             Rearrange("b n c t -> (b n) c t"),
-            STFTOnly(),
-            ToMagnitudeOnly(),
+            ToSTFT(),
+            ToMagnitude(),
         ))(targets)
         self.is_debug = False

@@ -3,6 +3,42 @@ import sys
 from torch import nn
 
 
+class Seq(nn.Module):
+    def __init__(self, *modules):
+        super().__init__()
+        self.name = "Seq"
+        self.modules_list = nn.ModuleList(modules)
+
+        new_modules = nn.ModuleList()
+        for module in self.modules_list:
+            new_modules.append(module)
+        self.modules_list = new_modules
+
+    def forward(self, x):
+        for i, module in enumerate(self.modules_list):
+            try:
+                x = self.run_module(x, module)
+            except Exception as e:
+                if not isinstance(e, SeqException):
+                    seq_e = SeqException(str(e))
+                    seq_e.add_module(i, module)
+                    raise seq_e from None
+                else:
+                    e.add_module(i, module)
+                    raise
+        return x
+
+    def run_module(self, x, module):
+        if isinstance(x, tuple):
+            try:
+                x = module(*x)
+            except TypeError:
+                x = module(x[0])
+        else:
+            x = module(x)
+        return x
+
+
 class SeqException(Exception):
     def __init__(self, message):
         super().__init__("")
@@ -76,39 +112,3 @@ def custom_excepthook(exc_type, exc_value, exc_traceback):
 
 
 sys.excepthook = custom_excepthook
-
-
-class Seq(nn.Module):
-    def __init__(self, *modules):
-        super().__init__()
-        self.name = "Seq"
-        self.modules_list = nn.ModuleList(modules)
-
-        new_modules = nn.ModuleList()
-        for module in self.modules_list:
-            new_modules.append(module)
-        self.modules_list = new_modules
-
-    def forward(self, x):
-        for i, module in enumerate(self.modules_list):
-            try:
-                x = self.run_module(x, module)
-            except Exception as e:
-                if not isinstance(e, SeqException):
-                    seq_e = SeqException(str(e))
-                    seq_e.add_module(i, module)
-                    raise seq_e from None
-                else:
-                    e.add_module(i, module)
-                    raise
-        return x
-
-    def run_module(self, x, module):
-        if isinstance(x, tuple):
-            try:
-                x = module(*x)
-            except TypeError:
-                x = module(x[0])
-        else:
-            x = module(x)
-        return x

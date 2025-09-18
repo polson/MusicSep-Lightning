@@ -6,29 +6,23 @@ from einops.layers.torch import Rearrange
 
 from model.base_model import BaseModel
 from modules.functional import STFTAndInverse, Residual, ReshapeBCFT, Bandsplit, Repeat, \
-    Mask, ToMagnitude
+    Mask, ToMagnitudeAndInverse
 from modules.self_attention import SelfAttention
 from modules.seq import Seq
 from modules.unet import UNet
 
 
 class SwiGLU(nn.Module):
-    """
-    More memory-efficient SwiGLU that uses a single linear layer and splits.
-    """
-
     def __init__(self, dim, hidden_dim=None, bias=False):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = int(2 * dim * 4 / 3)
-
-        # Single layer that outputs 2 * hidden_dim, then we split
         self.gate_proj = nn.Linear(dim, 2 * hidden_dim, bias=bias)
         self.down_proj = nn.Linear(hidden_dim, dim, bias=bias)
 
     def forward(self, x):
         gate_value = self.gate_proj(x)
-        gate, value = gate_value.chunk(2, dim=-1)  # Split into gate and value
+        gate, value = gate_value.chunk(2, dim=-1)
         hidden = F.silu(gate) * value
         return self.down_proj(hidden)
 
@@ -96,7 +90,7 @@ class MagSplitModel(BaseModel):
                 in_channels=2,
                 n_fft=n_fft,
                 hop_length=hop_length,
-                fn=lambda shape: ToMagnitude(
+                fn=lambda shape: ToMagnitudeAndInverse(
                     shape=shape,
                     fn=lambda shape: Mask(
                         Rearrange("b c f t -> b 1 (f c) t"),

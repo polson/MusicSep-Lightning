@@ -1,9 +1,8 @@
 from pathlib import Path
-from typing import List
 
 import torch
-import torchaudio
 import torch.nn.functional as F
+import torchaudio
 from einops import rearrange
 
 
@@ -28,24 +27,22 @@ class Separator:
             output_dir: str = None
     ):
         waveform, sample_rate = torchaudio.load(mixture_path)
-        chunks = self._create_chunks(waveform)  # n c t
+        chunks = self._create_chunks(waveform)
 
-        # Get input file extension to use for output
         ext = Path(mixture_path).suffix.lower()
         processed_chunks = []
         for chunk in chunks:
             chunk = chunk.to(model.device)
             with torch.no_grad():
                 output = model(chunk)
-            processed_chunks.append(output)  # list(b n c t)
+            processed_chunks.append(output)
 
-        # recombine chunks
         recombined = self._overlap_add_chunks(
             processed_chunks,
             waveform.shape[-1],
         )
 
-        stems = torch.unbind(recombined, dim=0)  # n tensors of c t
+        stems = torch.unbind(recombined, dim=0)
 
         output_dir = Path(output_dir) if output_dir else None
         if output_dir:
@@ -69,7 +66,7 @@ class Separator:
     ):
         step_size = self.chunk_size - self.overlap_size
         waveform = F.pad(waveform, (step_size, step_size))
-        chunked = waveform.unfold(dimension=-1, size=self.chunk_size, step=step_size)  # (c, n, t)
+        chunked = waveform.unfold(dimension=-1, size=self.chunk_size, step=step_size)
         chunked = rearrange(chunked, "c n t -> n c t")
 
         n, c, t = chunked.shape
@@ -84,7 +81,7 @@ class Separator:
             original_waveform_length: int,
     ) -> torch.Tensor:
         step_size = self.chunk_size - self.overlap_size
-        combined_chunks = torch.cat(chunks, dim=0)  # (b num_inst 2 chunk_size)
+        combined_chunks = torch.cat(chunks, dim=0)
 
         padded_output_length = original_waveform_length + 2 * step_size
 
@@ -96,16 +93,13 @@ class Separator:
 
         hann_window = torch.hann_window(self.chunk_size, device=combined_chunks.device)
 
-        # Place each chunk in the output waveform with overlap-add
         for i in range(b):
             start_idx = i * step_size
             end_idx = start_idx + self.chunk_size
 
-            # Apply Hann window to the chunk and add to output
             windowed_chunk = combined_chunks[i] * hann_window
             output_waveform[:, :, start_idx:end_idx] += windowed_chunk
 
-        # Remove padding that was added in _create_chunks
         restored_waveform = output_waveform[:, :, step_size:-step_size]
 
         return restored_waveform

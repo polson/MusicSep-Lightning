@@ -1,11 +1,11 @@
 import inspect
 import logging
 import os
-import random  # Added for completeness in seeding
+import random
 from datetime import datetime
 
 import lightning as L
-import numpy as np  # Added for completeness in seeding
+import numpy as np
 import torch
 from lightning.fabric import disable_possible_user_warnings
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -44,7 +44,7 @@ def setup_logger(config):
     logger = False
     if config.logging.wandb.enabled:
         model_name = model.model.__class__.__name__
-        now = datetime.now()  # Gets local date and time
+        now = datetime.now()
         formatted = now.strftime('%Y-%m-%d %H:%M:%S')
         logger = WandbLogger(
             name=model_name + " - " + formatted,
@@ -101,7 +101,6 @@ def setup_logging():
 
 
 def run_inference(trainer, model, config):
-    """Run inference on the specified inference path."""
     print(f"\nRunning inference on: {config.paths.inference_input}")
     results = trainer.predict(model=model)
     print(f"Inference completed! Processed {len(results)} files.")
@@ -110,7 +109,6 @@ def run_inference(trainer, model, config):
 
 
 def set_seed(seed: int):
-    """Sets the seed for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -146,7 +144,6 @@ if __name__ == "__main__":
         run_inference(trainer, model, config)
         exit(0)
 
-    # Train the model (if not in eval-only mode)
     print("\nStarting training for", config.training.max_epochs, "epochs...")
     trainer.fit(
         model=model

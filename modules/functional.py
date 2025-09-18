@@ -1,67 +1,36 @@
-import sys
 from dataclasses import dataclass, replace
 from typing import List
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange, parse_shape
-from einops.layers.torch import Rearrange
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from modules.fft import RFFTModule, RFFT2DModule, DCT2DModule
+from modules.fft import RFFTModule, RFFT2DModule
 from modules.seq import Seq
 from modules.stft import STFT
-
-import torch.nn.functional as F
 
 
 @dataclass
 class CFTShape:
-    c: int  # channels
-    f: int  # frequency
-    t: int  # time
+    c: int
+    f: int
+    t: int
 
 
-@dataclass
-class CTShape:
-    c: int  # channels
-    t: int  # time
-
-
-@dataclass
-class CFShape:
-    c: int  # channels
-    f: int  # time
-
-
-@dataclass
-class TFShape:
-    c: int  # channels
-    f: int  # time
-
-
-class DropBlock(nn.Module):
-    def __init__(self, drop_prob=0.0, *args):
+class DebugShape(nn.Module):
+    def __init__(self, name: str = None):
         super().__init__()
-        self.fn = Seq(*args)
-        self.drop_prob = drop_prob
+        self.fn = nn.Identity()
+        self.name = name
 
-    def __repr__(self):
-        return f"DropBlock(drop_prob={self.drop_prob}, fn={self.fn})"
-
-    def forward(self, x):
-        """Determines whether to drop the block and runs it if not dropped."""
-        if self.training and torch.rand(1).item() < self.drop_prob:
-            return x
-        return self.fn(x)
-
-
-class Abs(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        return torch.abs(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.fn(x)
+        name_prefix = f"{self.name}: " if self.name else ""
+        print(
+            f"{name_prefix}Shape: {x.shape}, Min: {x.min().item():.4f}, Max: {x.max().item():.4f}, Mean: {x.mean().item():.4f}")
+        return x
 
 
 class Residual(nn.Module):
@@ -71,50 +40,6 @@ class Residual(nn.Module):
 
     def forward(self, x):
         return self.fn(x) + x
-
-
-class SplitSum(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        # Split channels in half: [b, c*2, ...] -> two tensors of [b, c, ...]
-        c_total = x.shape[1]
-        c_half = c_total // 2
-
-        x1 = x[:, :c_half, ...]
-        x2 = x[:, c_half:, ...]
-
-        # Sum the two halves to get [b, c, ...]
-        x_split_sum = x1 + x2
-
-        return x_split_sum
-
-
-class Plus(nn.Module):
-    def __init__(self, value):
-        super().__init__()
-        self.value = value
-
-    def __repr__(self):
-        return f"Plus(value={self.value})"
-
-    def forward(self, x):
-        return x + self.value
-
-
-class Freeze(nn.Module):
-    def __init__(self, *args):
-        super().__init__()
-        self.fn = Seq(*args)
-        for param in self.fn.parameters():
-            param.requires_grad = False
-
-    def __repr__(self):
-        return f"Freeze(fn={self.fn})"
-
-    def forward(self, x):
-        return self.fn(x)
 
 
 class Mask(nn.Module):
@@ -129,17 +54,35 @@ class Mask(nn.Module):
         return self.fn(x) * x
 
 
-class MaskInstruments(nn.Module):
-    def __init__(self, num_instruments, *args):
+class Scale(nn.Module):
+    def __init__(self, scale, *args):
         super().__init__()
         self.fn = Seq(*args)
-        self.num_instruments = num_instruments
+        self.scale = scale
 
     def __repr__(self):
-        return f"MaskInstruments(num_instruments={self.num_instruments}, fn={self.fn})"
+        return f"Scale(scale={self.scale}, fn={self.fn})"
 
     def forward(self, x):
-        return self.fn(x) * x.repeat(1, self.num_instruments, 1, 1)
+        return self.fn(x) * self.scale
+
+
+class Concat(nn.Module):
+    def __init__(self, *fns):
+        super().__init__()
+        self.fns = nn.ModuleList(fns)
+
+    def __repr__(self):
+        return f"Concat(fns={self.fns})"
+
+    def forward(self, x):
+        outputs = [fn(x) for fn in self.fns]
+        return torch.cat(outputs, dim=1)
+
+
+class Abs(nn.Module):
+    def forward(self, x):
+        return torch.abs(x)
 
 
 class Film(nn.Module):
@@ -174,21 +117,43 @@ class SwiGLU(nn.Module):
         return self.silu(gate) * value
 
 
-class ForgetGate(nn.Module):
-    def __init__(self, dim, *args):
+class SplitSum(nn.Module):
+    def forward(self, x):
+        c_total = x.shape[1]
+        c_half = c_total // 2
+        x1 = x[:, :c_half, ...]
+        x2 = x[:, c_half:, ...]
+        return x1 + x2
+
+
+class DropBlock(nn.Module):
+    def __init__(self, drop_prob=0.0, *args):
         super().__init__()
-        self.dim = dim
         self.fn = Seq(*args)
+        self.drop_prob = drop_prob
 
     def __repr__(self):
-        return f"ForgetGate(dim={self.dim}, fn={self.fn})"
+        return f"DropBlock(drop_prob={self.drop_prob}, fn={self.fn})"
 
     def forward(self, x):
-        residual = x
-        x = self.fn(x)
-        transform, gate = torch.split(x, x.shape[self.dim] // 2, dim=self.dim)
-        gate = torch.sigmoid(gate)
-        return gate * transform + (1 - gate) * residual
+        """Determines whether to drop the block and runs it if not dropped."""
+        if self.training and torch.rand(1).item() < self.drop_prob:
+            return x
+        return self.fn(x)
+
+
+class Freeze(nn.Module):
+    def __init__(self, *args):
+        super().__init__()
+        self.fn = Seq(*args)
+        for param in self.fn.parameters():
+            param.requires_grad = False
+
+    def __repr__(self):
+        return f"Freeze(fn={self.fn})"
+
+    def forward(self, x):
+        return self.fn(x)
 
 
 class Repeat(nn.Module):
@@ -241,13 +206,11 @@ class RepeatWithArgsConcat(nn.Module):
         for i in range(self.num_repeats):
             output_i = self.blocks[i](x)
             outputs.append(output_i)
-
         concatenated_output = torch.cat(outputs, dim=1)
-
         return concatenated_output
 
 
-class RepeatDim(nn.Module):
+class CopyDim(nn.Module):
     def __init__(self, dim, times):
         super().__init__()
         self.dim = dim
@@ -306,7 +269,6 @@ class PadBCFTNearestMultiple(nn.Module):
         x = self.fn(x)
         if f_pad > 0 or t_pad > 0:
             x = x[:, :, :f, :t]
-
         return x
 
 
@@ -328,7 +290,6 @@ class PadBCTNearestMultiple(nn.Module):
         x = self.fn(x)
         if t_pad > 0:
             x = x[:, :, :, :t]
-
         return x
 
 
@@ -366,32 +327,6 @@ class SoftmaxMask(nn.Module):
         mixture = mixture.repeat(1, num_multiplies, 1, 1)
         x = x * mixture
         return x
-
-
-class Scale(nn.Module):
-    def __init__(self, scale, *args):
-        super().__init__()
-        self.fn = Seq(*args)
-        self.scale = scale
-
-    def __repr__(self):
-        return f"Scale(scale={self.scale}, fn={self.fn})"
-
-    def forward(self, x):
-        return self.fn(x) * self.scale
-
-
-class Concat(nn.Module):
-    def __init__(self, *fns):
-        super().__init__()
-        self.fns = nn.ModuleList(fns)
-
-    def __repr__(self):
-        return f"Concat(fns={self.fns})"
-
-    def forward(self, x):
-        outputs = [fn(x) for fn in self.fns]
-        return torch.cat(outputs, dim=1)
 
 
 class Shrink(nn.Module):
@@ -438,10 +373,7 @@ class Bandsplit(nn.Module):
             f = f + padding
 
         x = rearrange(x, 'b c (n f) t -> b (n c) f t', n=self.num_splits)
-
-        # Pass the shape to the function
         x = self.fn(x)
-
         x = rearrange(x, 'b (n c) f t -> b c (n f) t', n=self.num_splits)
 
         if remainder != 0:
@@ -480,20 +412,6 @@ class TimeSplit(nn.Module):
         return x
 
 
-class DebugShape(nn.Module):
-    def __init__(self, name: str = None):
-        super().__init__()
-        self.fn = nn.Identity()
-        self.name = name
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fn(x)
-        name_prefix = f"{self.name}: " if self.name else ""
-        print(
-            f"{name_prefix}Shape: {x.shape}, Min: {x.min().item():.4f}, Max: {x.max().item():.4f}, Mean: {x.mean().item():.4f}")
-        return x
-
-
 class Condition(nn.Module):
     def __init__(self, condition, true_fn, false_fn=None):
         super().__init__()
@@ -521,14 +439,9 @@ class ReshapeBCFT(nn.Module):
         return f"ReshapeBCFT(reshape_to='{self.reshape_to}', fn={self.fn})"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Store shape info
         shape_dict = dict(zip(['b', 'c', 'f', 't'], x.shape))
-
-        # Transform and process
         x_intermediate = rearrange(x, f'b c f t -> {self.reshape_to}', **shape_dict)
         x_processed = self.fn(x_intermediate)
-
-        # Restore using stored shape
         output = rearrange(x_processed, f'{self.reshape_to} -> b c f t', **shape_dict)
         return output
 
@@ -576,21 +489,33 @@ class SideEffect(nn.Module):
         return x
 
 
-class Sum(nn.Module):
+class ComplexMask(nn.Module):
     def __init__(self, *args):
         super().__init__()
         self.fn = Seq(*args)
 
     def __repr__(self):
-        return f"Sum(fn={self.fn})"
+        return f"ComplexMask(fn={self.fn})"
 
     def forward(self, x):
-        x = self.fn(x)
-        x = torch.sum(x, dim=1)
-        return x
+        b, c, f, t = x.shape
+        assert c % 2 == 0, "Channel dimension must be even for real/imag pairs"
+        original_dtype = x.dtype
+        x_float32 = x.float()
+        x_complex = rearrange(x_float32, 'b (ch ri) f t -> b ch f t ri', ri=2)
+        residual = torch.view_as_complex(x_complex.contiguous())
+        x_processed = self.fn(x)
+        x_processed_float32 = x_processed.float()
+        x_processed_complex = rearrange(x_processed_float32, 'b (ch ri) f t -> b ch f t ri', ri=2)
+        x_processed = torch.view_as_complex(x_processed_complex.contiguous())
+        result = residual * x_processed
+        result_real = torch.view_as_real(result)
+        result = rearrange(result_real, 'b ch f t ri -> b (ch ri) f t')
+        result = result.to(original_dtype)
+        return result
 
 
-class ToFFT(nn.Module):
+class FFT1dAndInverse(nn.Module):
     def __init__(self, channels, fn):
         super().__init__()
         self.channels = channels
@@ -608,49 +533,7 @@ class ToFFT(nn.Module):
         return x
 
 
-class ComplexMask(nn.Module):
-    def __init__(self, *args):
-        super().__init__()
-        self.fn = Seq(*args)
-
-    def __repr__(self):
-        return f"ComplexMask(fn={self.fn})"
-
-    def forward(self, x):
-        # x shape: (b, c, f, t) where c is even, with interleaved real/imag pairs
-        b, c, f, t = x.shape
-        assert c % 2 == 0, "Channel dimension must be even for real/imag pairs"
-
-        # Store original dtype and convert to float32 for complex operations
-        original_dtype = x.dtype
-        x_float32 = x.float()
-
-        # Reshape to separate real/imag pairs and convert to complex
-        x_complex = rearrange(x_float32, 'b (ch ri) f t -> b ch f t ri', ri=2)
-        residual = torch.view_as_complex(x_complex.contiguous())
-
-        # Apply function to original tensor (keeping original dtype)
-        x_processed = self.fn(x)
-
-        # Convert processed tensor to float32 and reshape to complex
-        x_processed_float32 = x_processed.float()
-        x_processed_complex = rearrange(x_processed_float32, 'b (ch ri) f t -> b ch f t ri', ri=2)
-        x_processed = torch.view_as_complex(x_processed_complex.contiguous())
-
-        # Complex multiplication
-        result = residual * x_processed
-
-        # Convert back to real and reshape to original format
-        result_real = torch.view_as_real(result)  # (b, ch, f, t, 2)
-        result = rearrange(result_real, 'b ch f t ri -> b (ch ri) f t')
-
-        # Convert back to original dtype
-        result = result.to(original_dtype)
-
-        return result
-
-
-class ToFFT2d(nn.Module):
+class FFT2dAndInverse(nn.Module):
     def __init__(self, shape: CFTShape, fn):
         super().__init__()
         self.shape = shape
@@ -669,20 +552,7 @@ class ToFFT2d(nn.Module):
         return x
 
 
-class ToFFT2dOnly(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fft = RFFT2DModule()
-
-    def __repr__(self):
-        return f"ToFFT1dOnly()"
-
-    def forward(self, x):
-        x = self.fft(x)
-        return x
-
-
-class ToFFT1dOnly(nn.Module):
+class FFT1d(nn.Module):
     def __init__(self):
         super().__init__()
         self.fft = RFFTModule()
@@ -695,20 +565,16 @@ class ToFFT1dOnly(nn.Module):
         return x
 
 
-class ToDCT2d(nn.Module):
-    def __init__(self, channels, fn):
+class FFT2d(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.channels = channels
-        self.fn = fn(channels)
-        self.dct = DCT2DModule()
+        self.fft = RFFT2DModule()
 
     def __repr__(self):
-        return f"ToDCT2d(channels={self.channels}, fn={self.fn})"
+        return f"ToFFT1dOnly()"
 
     def forward(self, x):
-        x = self.dct(x)
-        x = self.fn(x)
-        x = self.dct.inverse(x)
+        x = self.fft(x)
         return x
 
 
@@ -745,7 +611,7 @@ class STFTAndInverse(nn.Module):
         return x
 
 
-class STFTOnly(nn.Module):
+class ToSTFT(nn.Module):
     def __init__(self, in_channels=2, in_samples=44100, n_fft=2048, hop_length=512):
         super().__init__()
         self.in_channels = in_channels
@@ -766,118 +632,20 @@ class STFTOnly(nn.Module):
         return x
 
 
-class Bias2d(nn.Module):
-    def __init__(self, channels, max_f=2048, max_t=2048):
-        super(Bias2d, self).__init__()
-        self.channels = channels
-        self.max_f = max_f
-        self.max_t = max_t
-        self.pos_embed_f = nn.Parameter(torch.zeros(1, channels, max_f, 1))
-        self.pos_embed_t = nn.Parameter(torch.zeros(1, channels, 1, max_t))
-        nn.init.trunc_normal_(self.pos_embed_f, std=.02)
-        nn.init.trunc_normal_(self.pos_embed_t, std=.02)
-
-    def __repr__(self):
-        return f"Bias2d(channels={self.channels}, max_f={self.max_f}, max_t={self.max_t})"
-
-    def forward(self, x):
-        b, c, f, t = x.shape
-        return x + self.pos_embed_f[:, :, :f, :t]
-
-
-class Bias2dChannels(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.channels = channels
-        self.pos_embed = nn.Parameter(torch.zeros(1, channels, 1, 1))
-        nn.init.trunc_normal_(self.pos_embed, std=.02)
-
-    def __repr__(self):
-        return f"Bias2dChannels(channels={self.channels})"
-
-    def forward(self, x):
-        return x * self.pos_embed
-
-
-class Bias2dFreq(nn.Module):
-    def __init__(self, freq):
-        super().__init__()
-        self.freq = freq
-        self.pos_embed = nn.Parameter(torch.zeros(1, 1, freq, 1))
-        nn.init.trunc_normal_(self.pos_embed, std=.00002)
-
-    def __repr__(self):
-        return f"Bias2dFreq(freq={self.freq})"
-
-    def forward(self, x):
-        return x + self.pos_embed
-
-
-class Bias1d(nn.Module):
-    def __init__(self, channels, max_len=2048):
-        super(Bias1d, self).__init__()
-        self.channels = channels
-        self.max_len = max_len
-        self.pos_embed = nn.Parameter(torch.zeros(1, channels, max_len))
-        nn.init.trunc_normal_(self.pos_embed, std=.02)
-
-    def __repr__(self):
-        return f"Bias1d(channels={self.channels}, max_len={self.max_len})"
-
-    def forward(self, x):
-        b, c, seq_len = x.shape
-        return x + self.pos_embed[:, :, :seq_len]
-
-
 class Zeroes(nn.Module):
-    """Zero out the input tensor"""
-
     def __init__(self):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.zeros_like(x)  # Return a tensor of zeros with the same shape as x
+        return torch.zeros_like(x)
 
 
 class Ones(nn.Module):
-    """Zero out the input tensor"""
-
     def __init__(self):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.ones_like(x)  # Return a tensor of zeros with the same shape as x
-
-
-class SplitTensor(nn.Module):
-    """Split tensor along specified dimension and apply the same function to each split"""
-
-    def __init__(self, dim=1, fn=None):
-        super().__init__()
-        self.dim = dim
-        self.fn = fn
-
-    def __repr__(self):
-        return f"Split(dim={self.dim}, fn={self.fn})"
-
-    def forward(self, x):
-        # Split along specified dimension into separate tensors
-        split_tensors = torch.unbind(x, dim=self.dim)
-
-        # Apply the same function to each split tensor
-        outputs = []
-        for split_tensor in split_tensors:
-            if self.fn is not None:
-                # Add dimension back for processing
-                split_with_dim = split_tensor.unsqueeze(self.dim)
-                output = self.fn(split_with_dim)
-                outputs.append(output)
-            else:
-                # If no function specified, just return the split with dimension restored
-                outputs.append(split_tensor.unsqueeze(self.dim))
-
-        # Concatenate results back along the same dimension
-        return torch.cat(outputs, dim=self.dim)
+        return torch.ones_like(x)
 
 
 class SplitNTensor(nn.Module):
@@ -932,13 +700,6 @@ class SplitNTensor(nn.Module):
 
 
 class Checkpoint(nn.Module):
-    """
-    Wrapper module that applies gradient checkpointing to the wrapped function.
-
-    Gradient checkpointing trades compute for memory by not storing intermediate
-    activations during the forward pass, and recomputing them during backward pass.
-    """
-
     def __init__(self, *args):
         super().__init__()
         self.fn = Seq(*args)
@@ -997,49 +758,7 @@ class Interpolate(nn.Module):
         )
 
 
-class GaussianNoise(nn.Module):
-    """
-    Adds Gaussian noise to input tensors with shape (batch, channels, frequency, time).
-
-    Args:
-        std (float): Standard deviation of the Gaussian noise. Default: 0.1
-        mean (float): Mean of the Gaussian noise. Default: 0.0
-        training_only (bool): If True, noise is only added during training. Default: True
-    """
-
-    def __init__(self, std=0.25, mean=0.0, training_only=False):
-        super(GaussianNoise, self).__init__()
-        self.std = std
-        self.mean = mean
-        self.training_only = training_only
-
-    def __repr__(self):
-        return f"GaussianNoise(std={self.std}, mean={self.mean}, training_only={self.training_only})"
-
-    def forward(self, x):
-        """
-        Forward pass that adds Gaussian noise to the input tensor.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (batch, channels, frequency, time)
-
-        Returns:
-            torch.Tensor: Noisy tensor with the same shape as input
-        """
-        if self.training_only and not self.training:
-            return x
-
-        # Generate Gaussian noise with the same shape as input
-        noise = torch.randn_like(x) * self.std + self.mean
-
-        return x + noise
-
-    def extra_repr(self):
-        """String representation of the module parameters."""
-        return f'std={self.std}, mean={self.mean}, training_only={self.training_only}'
-
-
-class ToMagnitude(nn.Module):
+class ToMagnitudeAndInverse(nn.Module):
     def __init__(self, shape: CFTShape, fn, eps=1e-6):
         super().__init__()
         self.shape = shape
@@ -1069,102 +788,7 @@ class ToMagnitude(nn.Module):
         return output
 
 
-class ToPhase(nn.Module):
-    def __init__(self, shape: CFTShape, fn, eps=1e-6, phase_mode='direct'):
-        super().__init__()
-        self.shape = shape
-        self.fn = fn(shape)
-        self.eps = eps
-        self.phase_mode = phase_mode  # 'direct', 'normalized', 'wrapped', 'complex_polar'
-
-    def __repr__(self):
-        return f"ToPhase(shape={self.shape}, fn={self.fn}, eps={self.eps}, phase_mode='{self.phase_mode}')"
-
-    def forward(self, x):
-        # Ensure input tensor has consistent dtype
-        real_parts = x[:, 0::2, :, :]
-        imag_parts = x[:, 1::2, :, :]
-
-        # More robust magnitude calculation
-        magnitude = torch.sqrt(torch.clamp(real_parts ** 2 + imag_parts ** 2, min=self.eps))
-        eps_tensor = torch.tensor(self.eps, dtype=x.dtype, device=x.device)
-        original_phase = torch.atan2(imag_parts, real_parts + eps_tensor)
-
-        if self.phase_mode == 'direct':
-            # Method 1: Direct phase prediction (often easier for networks)
-            # Normalize phase to [0, 1] range for better learning
-            normalized_phase = (original_phase + torch.pi) / (2 * torch.pi)
-
-            # Let network predict normalized phase directly
-            predicted_normalized = self.fn(normalized_phase)
-
-            # Convert back to radians
-            predicted_phase = predicted_normalized * (2 * torch.pi) - torch.pi
-
-        elif self.phase_mode == 'normalized':
-            # Method 2: Normalized phase with bounded output
-            # Normalize to [-1, 1] and use tanh activation implicitly
-            normalized_phase = original_phase / torch.pi
-            predicted_normalized = self.fn(normalized_phase)
-            predicted_phase = torch.tanh(predicted_normalized) * torch.pi
-
-        elif self.phase_mode == 'wrapped':
-            # Method 3: Unwrapped phase for continuity
-            unwrapped_phase = torch.cumsum(torch.diff(original_phase, dim=-1, prepend=original_phase[..., :1]), dim=-1)
-            predicted_unwrapped = self.fn(unwrapped_phase)
-            # Wrap back to [-π, π]
-            predicted_phase = torch.remainder(predicted_unwrapped + torch.pi, 2 * torch.pi) - torch.pi
-
-        elif self.phase_mode == 'complex_polar':
-            # Method 4: Work in complex exponential space with view_as_real
-            # e^(iθ) representation - often more stable
-            complex_unit = torch.complex(torch.cos(original_phase), torch.sin(original_phase))
-
-            # Reshape to interleaved real/imag format for the network
-            # Input shape: (b, c//2, f, t) -> Output shape: (b, c, f, t)
-            b, c_half, f, t = complex_unit.shape
-
-            # Convert complex tensor to interleaved real/imag format
-            complex_input_interleaved = torch.zeros(b, c_half * 2, f, t, dtype=x.dtype, device=x.device)
-            complex_input_interleaved[:, 0::2, :, :] = complex_unit.real
-            complex_input_interleaved[:, 1::2, :, :] = complex_unit.imag
-
-            # Network predicts new interleaved real/imag values
-            predicted_interleaved = self.fn(complex_input_interleaved)
-
-            # Extract real and imaginary parts from network output
-            predicted_real = predicted_interleaved[:, 0::2, :, :]
-            predicted_imag = predicted_interleaved[:, 1::2, :, :]
-
-            # Reconstruct complex tensor
-            predicted_complex = torch.complex(predicted_real, predicted_imag)
-
-            # Normalize to unit circle (crucial for phase representation)
-            predicted_complex = predicted_complex / (torch.abs(predicted_complex) + self.eps)
-
-            # Extract phase from normalized complex number
-            predicted_phase = torch.angle(predicted_complex)
-
-        else:
-            raise ValueError(f"Unknown phase_mode: {self.phase_mode}")
-
-        # Final output calculation
-        new_real = magnitude * torch.cos(predicted_phase)
-        new_imag = magnitude * torch.sin(predicted_phase)
-
-        # Safety net for NaN values
-        new_real = torch.where(torch.isnan(new_real), torch.zeros_like(new_real), new_real)
-        new_imag = torch.where(torch.isnan(new_imag), torch.zeros_like(new_imag), new_imag)
-
-        # Assemble output
-        output = torch.zeros_like(x)
-        output[:, 0::2, :, :] = new_real
-        output[:, 1::2, :, :] = new_imag
-
-        return output
-
-
-class ToMagnitudeOnly(nn.Module):
+class ToMagnitude(nn.Module):
     def __init__(self, eps=1e-6):
         super().__init__()
         self.eps = eps
@@ -1179,107 +803,3 @@ class ToMagnitudeOnly(nn.Module):
         magnitude = torch.sqrt(real_parts ** 2 + imag_parts ** 2 + self.eps)
 
         return magnitude
-
-
-import torch
-import torch.nn as nn
-
-
-class ToPhaseOnly(nn.Module):
-    def __init__(self, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-
-    def __repr__(self):
-        return f"ToPhaseOnly(eps={self.eps})"
-
-    def forward(self, x):
-        # Extract real and imaginary parts
-        real_parts = x[:, 0::2, :, :]
-        imag_parts = x[:, 1::2, :, :]
-
-        # Compute and return phase
-        phase = torch.atan2(imag_parts, real_parts + self.eps)
-
-        return phase
-
-
-class ToPhaseOnlySinusoidal(nn.Module):
-    def __init__(self, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-
-    def __repr__(self):
-        return f"ToPhaseOnlySinusoidal(eps={self.eps})"
-
-    def forward(self, x):
-        # Extract real and imaginary parts
-        real_parts = x[:, 0::2, :, :]
-        imag_parts = x[:, 1::2, :, :]
-
-        # Compute phase
-        phase = torch.atan2(imag_parts, real_parts + self.eps)
-
-        # Convert to sinusoidal representation
-        cos_phase = torch.cos(phase)
-        sin_phase = torch.sin(phase)
-
-        # Interleave cos and sin along channel dimension
-        # cos_phase and sin_phase have shape [b, c//2, f, t]
-        # We want output shape [b, c, f, t] with cos/sin interleaved
-        b, c_half, f, t = cos_phase.shape
-        output = torch.empty(b, c_half * 2, f, t, device=x.device, dtype=x.dtype)
-        output[:, 0::2, :, :] = cos_phase  # Even indices get cos
-        output[:, 1::2, :, :] = sin_phase  # Odd indices get sin
-
-        return output
-
-
-class PowerLawProcessor(nn.Module):
-    def __init__(self, gamma, *args):
-        super().__init__()
-        self.gamma = gamma
-        self.fn = Seq(*args)
-        self.eps = 1e-8
-
-    def __repr__(self):
-        return f"PowerLawProcessor(gamma={self.gamma}, fn={self.fn}, eps={self.eps})"
-
-    def forward(self, x):
-        # Ensure positive values and clamp to avoid numerical issues
-        x_safe = torch.clamp(x, min=self.eps)
-
-        # Compress: x^(1/gamma)
-        compressed = torch.pow(x_safe, 1.0 / self.gamma)
-
-        # Process
-        processed = self.fn(compressed)
-
-        # Ensure processed values are safe for decompression
-        processed_safe = torch.clamp(processed, min=self.eps)
-
-        # Decompress: x^gamma
-        decompressed = torch.pow(processed_safe, self.gamma)
-
-        return decompressed
-
-
-class ExpOnly(nn.Module):
-    def __init__(self, factor, eps=1e-8):
-        super().__init__()
-        self.factor = factor
-        self.eps = eps
-
-    def __repr__(self):
-        return f"ExpOnly(factor={self.factor}, eps={self.eps})"
-
-    def forward(self, x):
-        # Apply power law compression: x^(1/factor)
-        # Handle negative values by preserving sign
-        sign = torch.sign(x)
-        abs_x = torch.abs(x) + self.eps
-
-        # Compress using power law
-        compressed = sign * torch.pow(abs_x, 1.0 / self.factor)
-
-        return compressed

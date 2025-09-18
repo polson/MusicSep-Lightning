@@ -46,7 +46,6 @@ class TrainDataset(IterableDataset):
         self.targets = targets
         self.aligned_mixture = aligned_mixture
 
-        # Groupings for random and aligned mixtures
         self.wav_groups = self._group_wavs_by_file_stem()
         self.song_groups = self._group_wavs_by_song()
 
@@ -78,7 +77,6 @@ class TrainDataset(IterableDataset):
                 continue
 
     def _group_wavs_by_file_stem(self) -> Dict[str, List[WavMetadata]]:
-        """Groups wav files by their type (e.g., 'vocals', 'bass') for random mixing."""
         wav_groups = defaultdict(list)
         for path in self.root_dir.rglob("*"):
             if path.suffix.lower() != '.wav':
@@ -95,7 +93,6 @@ class TrainDataset(IterableDataset):
         return wav_groups
 
     def _group_wavs_by_song(self) -> Dict[Path, Dict[str, WavMetadata]]:
-        """Groups wav files by their parent directory for aligned mixing."""
         song_groups = defaultdict(dict)
         for path in self.root_dir.rglob("*"):
             if path.suffix.lower() != '.wav':
@@ -112,7 +109,6 @@ class TrainDataset(IterableDataset):
         return {k: v for k, v in song_groups.items() if v}
 
     def _create_mixture(self):
-        """Creates a mixture, dispatching to the correct method based on the mode."""
         while True:
             if self.aligned_mixture:
                 mixture = self._create_aligned_mixture()
@@ -125,7 +121,6 @@ class TrainDataset(IterableDataset):
                 continue
 
     def _create_aligned_mixture(self) -> Mixture | None:
-        """Creates a mixture from tracks within the same song folder, aligned in time."""
         if not self.song_groups:
             return None
 
@@ -164,7 +159,6 @@ class TrainDataset(IterableDataset):
         return Mixture(audios=audios)
 
     def _try_create_random_mixture(self) -> Mixture | None:
-        """Creates a mixture from random tracks of different types (original behavior)."""
         audios = {}
         for wav_type in self.wav_groups.keys():
             wav = random.choice(self.wav_groups[wav_type])
@@ -199,11 +193,8 @@ class TrainDataset(IterableDataset):
         return torch.from_numpy(audio.copy()).float().contiguous()
 
     def _get_mixture_and_targets_tensor(self, mixture: Mixture) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Create a zero tensor with the correct shape to act as a base
-        # This handles cases where a target instrument is missing from a mixture
         base_tensor = torch.zeros(self.chunk_length, dtype=torch.float32)
 
-        # Sum available audios, ensuring they are not empty
         present_audios = list(mixture.audios.values())
         mixture_audio = torch.stack(present_audios).sum(dim=0) if present_audios else base_tensor.clone()
 
@@ -212,7 +203,6 @@ class TrainDataset(IterableDataset):
             if target_name == "mixture":
                 target_audios.append(mixture_audio)
             else:
-                # Use the actual audio if present, otherwise use a silent tensor
                 target_audios.append(mixture.audios.get(target_name, base_tensor.clone()))
 
         targets_tensor = torch.stack(target_audios)
@@ -230,7 +220,6 @@ class TrainDataset(IterableDataset):
             raw_data = wav_file.readframes(chunk_frames)
             data = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / np.iinfo(np.int16).max
 
-            # Pad if the read chunk is shorter than desired
             if len(data) < chunk_duration:
                 padding = np.zeros(chunk_duration - len(data), dtype=np.float32)
                 data = np.concatenate((data, padding))
