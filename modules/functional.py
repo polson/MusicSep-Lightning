@@ -1,5 +1,5 @@
 from dataclasses import dataclass, replace
-from typing import List
+from typing import List, Callable
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +17,23 @@ class CFTShape:
     c: int
     f: int
     t: int
+
+
+class ReshapeBCFT(nn.Module):
+    def __init__(self, reshape_to, *args):
+        super().__init__()
+        self.fn = Seq(*args)
+        self.reshape_to = reshape_to
+
+    def __repr__(self):
+        return f"ReshapeBCFT(reshape_to='{self.reshape_to}', fn={self.fn})"
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        shape_dict = dict(zip(['b', 'c', 'f', 't'], x.shape))
+        x_intermediate = rearrange(x, f'b c f t -> {self.reshape_to}', **shape_dict)
+        x_processed = self.fn(x_intermediate)
+        output = rearrange(x_processed, f'{self.reshape_to} -> b c f t', **shape_dict)
+        return output
 
 
 class DebugShape(nn.Module):
@@ -68,16 +85,17 @@ class Scale(nn.Module):
 
 
 class Concat(nn.Module):
-    def __init__(self, *fns):
+    def __init__(self, dim=1, *fns):
         super().__init__()
         self.fns = nn.ModuleList(fns)
+        self.dim = dim
 
     def __repr__(self):
-        return f"Concat(fns={self.fns})"
+        return f"Concat(fns={self.fns}, dim={self.dim})"
 
     def forward(self, x):
         outputs = [fn(x) for fn in self.fns]
-        return torch.cat(outputs, dim=1)
+        return torch.cat(outputs, dim=self.dim)
 
 
 class Abs(nn.Module):
@@ -227,36 +245,80 @@ class CopyDim(nn.Module):
 
 
 class PadBCFT(nn.Module):
-    def __init__(self, freq_pad, time_pad, fn):
+    def __init__(self, shape: CFTShape, target_time=None, fn=None, mode='constant', value=0):
+        """
+        Pad BCFT tensors from input shape to target dimensions.
+
+        Args:
+            shape: CFTShape object with input dimensions (c, f, t)
+            target_time: Target time dimension (if None, use shape.t)
+            fn: Function constructor that will receive the padded shape
+            mode: Padding mode ('reflect', 'constant', 'replicate', etc.)
+            value: Fill value for constant padding (default: 0)
+        """
         super(PadBCFT, self).__init__()
-        self.freq_pad = freq_pad
-        self.time_pad = time_pad
-        self.fn = fn
+        self.shape = shape
+        self.target_time = target_time if target_time is not None else shape.t
+        self.mode = mode
+        self.value = value
+
+        # Create the padded shape and initialize fn with it
+        padded_shape = CFTShape(
+            c=shape.c,
+            f=shape.f,
+            t=self.target_time
+        )
+        self.fn = fn(padded_shape) if fn is not None else None
 
     def __repr__(self):
-        return f"PadBCFT(freq_pad={self.freq_pad}, time_pad={self.time_pad}, fn={self.fn})"
+        return f"PadBCFT(shape={self.shape}, target_time={self.target_time}, fn={self.fn}, mode='{self.mode}', value={self.value})"
 
     def forward(self, x):
         b, c, f, t = x.shape
-        f_pad = self.freq_pad
-        t_pad = self.time_pad
-        padding = (t_pad, t_pad, f_pad, f_pad)
-        x = nn.functional.pad(x, padding, mode='reflect')
-        x = self.fn(x)
-        if f_pad > 0 or t_pad > 0:
-            x = x[:, :, f_pad:f_pad + f, t_pad:t_pad + t]
+
+        t_pad_right = self.target_time - t
+
+        # Apply padding if needed
+        padding = (0, t_pad_right, 0, 0)
+        x = nn.functional.pad(x, padding, mode=self.mode, value=self.value)
+
+        # Apply function if provided
+        if self.fn is not None:
+            x = self.fn(x)
+
+        if t_pad_right > 0:
+            x = x[:, :, :, :t]
+
         return x
 
 
 class PadBCFTNearestMultiple(nn.Module):
-    def __init__(self, freq_multiple, time_multiple, fn):
+    def __init__(self, shape: CFTShape, freq_multiple: int, time_multiple: int, fn: Callable):
         super(PadBCFTNearestMultiple, self).__init__()
+        self.shape = shape
         self.freq_multiple = freq_multiple
         self.time_multiple = time_multiple
-        self.fn = fn()
+
+        # Calculate padded shape
+        f_remainder = shape.f % freq_multiple
+        f_pad = (freq_multiple - f_remainder) % freq_multiple
+        t_remainder = shape.t % time_multiple
+        t_pad = (time_multiple - t_remainder) % time_multiple
+
+        padded_shape = replace(
+            shape,
+            f=shape.f + f_pad,
+            t=shape.t + t_pad
+        )
+
+        self.fn = fn(padded_shape)
 
     def __repr__(self):
-        return f"PadBCFTNearestMultiple(freq_multiple={self.freq_multiple}, time_multiple={self.time_multiple}, fn={self.fn})"
+        return (f"PadBCFTNearestMultiple("
+                f"shape={self.shape}, "
+                f"freq_multiple={self.freq_multiple}, "
+                f"time_multiple={self.time_multiple}, "
+                f"fn={self.fn})")
 
     def forward(self, x):
         b, c, f, t = x.shape
@@ -427,23 +489,6 @@ class Condition(nn.Module):
             return self.true_fn(x)
         else:
             return self.false_fn(x)
-
-
-class ReshapeBCFT(nn.Module):
-    def __init__(self, reshape_to, *args):
-        super().__init__()
-        self.fn = Seq(*args)
-        self.reshape_to = reshape_to
-
-    def __repr__(self):
-        return f"ReshapeBCFT(reshape_to='{self.reshape_to}', fn={self.fn})"
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        shape_dict = dict(zip(['b', 'c', 'f', 't'], x.shape))
-        x_intermediate = rearrange(x, f'b c f t -> {self.reshape_to}', **shape_dict)
-        x_processed = self.fn(x_intermediate)
-        output = rearrange(x_processed, f'{self.reshape_to} -> b c f t', **shape_dict)
-        return output
 
 
 class ReshapeBCT(nn.Module):
@@ -649,18 +694,22 @@ class Ones(nn.Module):
 
 
 class SplitNTensor(nn.Module):
-    def __init__(self, fns: List[nn.Module], split_points: List[int], dim: int = 1):
+    def __init__(self, shape: CFTShape, fns: List[Callable], split_points: List[int], dim: int = 1,
+                 concat_dim=1):
         """
         Split tensor at specified points along a dimension, apply separate functions to each split, then concatenate.
 
         Args:
-            fns: List of pre-created functions/modules to apply to each split
+            shape: CFTShape object describing the input tensor shape
+            fns: List of functions that take (CFTShape, index) and return a module/function
             split_points: List of indices where to split the tensor (exclusive end points)
             dim: Dimension along which to split
+            concat_dim: Dimension along which to concatenate outputs (defaults to dim if None)
         """
         super().__init__()
+        self.shape = shape
         self.dim = dim
-        self.fns = nn.ModuleList(fns)
+        self.concat_dim = concat_dim if concat_dim is not None else dim
         self.split_points = split_points
         self.n_splits = len(split_points) + 1
 
@@ -670,9 +719,53 @@ class SplitNTensor(nn.Module):
                 f"({self.n_splits}) created by {len(split_points)} split points"
             )
 
+        # Calculate the size along the split dimension
+        if dim == 1:
+            total_size = shape.c
+        elif dim == 2:
+            total_size = shape.f
+        elif dim == 3:
+            total_size = shape.t
+        else:
+            raise ValueError(f"Unsupported dimension {dim} for CFTShape")
+
+        # Validate split points
+        for i, point in enumerate(self.split_points):
+            if point <= 0 or point >= total_size:
+                raise ValueError(f"Split point {point} is out of bounds for dimension size {total_size}")
+            if i > 0 and point <= self.split_points[i - 1]:
+                raise ValueError(f"Split points must be in ascending order, got {self.split_points}")
+
+        # Create split shapes and instantiate functions
+        self.fns = nn.ModuleList()
+        start = 0
+
+        for i, split_point in enumerate(self.split_points):
+            size = split_point - start
+            split_shape = self._create_split_shape(shape, size, dim)
+            self.fns.append(fns[i](split_shape, i))
+            start = split_point
+
+        # Handle final split
+        final_size = total_size - start
+        final_split_shape = self._create_split_shape(shape, final_size, dim)
+        self.fns.append(fns[-1](final_split_shape, len(self.split_points)))
+
+    def _create_split_shape(self, original_shape: CFTShape, size: int, dim: int) -> CFTShape:
+        """Create a new CFTShape for a split with the given size along the specified dimension."""
+        if dim == 1:  # channels
+            return replace(original_shape, c=size)
+        elif dim == 2:  # frequency
+            return replace(original_shape, f=size)
+        elif dim == 3:  # time
+            return replace(original_shape, t=size)
+        else:
+            raise ValueError(f"Unsupported dimension {dim}")
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dim_size = x.size(self.dim)
 
+        # Runtime validation (kept for safety)
         for i, point in enumerate(self.split_points):
             if point <= 0 or point >= dim_size:
                 raise ValueError(f"Split point {point} is out of bounds for dimension size {dim_size}")
@@ -689,14 +782,17 @@ class SplitNTensor(nn.Module):
 
         final_size = dim_size - start
         splits.append(x.narrow(self.dim, start, final_size))
+
         outputs = [self.fns[i](split) for i, split in enumerate(splits)]
-        return torch.cat(outputs, dim=self.dim)
+        return torch.cat(outputs, dim=self.concat_dim)
 
     def __repr__(self) -> str:
         return (f"{self.__class__.__name__}("
+                f"shape={self.shape}, "
                 f"n_splits={self.n_splits}, "
                 f"split_points={self.split_points}, "
-                f"dim={self.dim})")
+                f"dim={self.dim}, "
+                f"concat_dim={self.concat_dim})")
 
 
 class Checkpoint(nn.Module):
@@ -759,27 +855,31 @@ class Interpolate(nn.Module):
 
 
 class ToMagnitudeAndInverse(nn.Module):
-    def __init__(self, shape: CFTShape, fn, eps=1e-6):
+    def __init__(self, shape: CFTShape, fn, eps=1e-6, retain_phase=True):
         super().__init__()
         self.shape = shape
         self.fn = fn(CFTShape(c=shape.c // 2, f=shape.f, t=shape.t))
         self.eps = eps
+        self.retain_phase = retain_phase
 
     def __repr__(self):
-        return f"ToMagnitude(shape={self.shape}, fn={self.fn}, eps={self.eps})"
+        return f"ToMagnitudeAndInverse(shape={self.shape}, fn={self.fn}, eps={self.eps}, retain_phase={self.retain_phase})"
 
     def forward(self, x):
         real_parts = x[:, 0::2, :, :]
         imag_parts = x[:, 1::2, :, :]
-
         magnitude = torch.sqrt(real_parts ** 2 + imag_parts ** 2 + self.eps)
 
-        processed_magnitude = self.fn(magnitude)
-
-        scale_factor = processed_magnitude / (magnitude + self.eps)
-
-        new_real = real_parts * scale_factor
-        new_imag = imag_parts * scale_factor
+        if self.retain_phase:
+            phase = torch.atan2(imag_parts, real_parts)
+            processed_magnitude = self.fn(magnitude)
+            new_real = processed_magnitude * torch.cos(phase)
+            new_imag = processed_magnitude * torch.sin(phase)
+        else:
+            processed_magnitude = self.fn(magnitude)
+            scale_factor = processed_magnitude / (magnitude + self.eps)
+            new_real = real_parts * scale_factor
+            new_imag = imag_parts * scale_factor
 
         output = torch.zeros_like(x)
         output[:, 0::2, :, :] = new_real
@@ -803,3 +903,18 @@ class ToMagnitude(nn.Module):
         magnitude = torch.sqrt(real_parts ** 2 + imag_parts ** 2 + self.eps)
 
         return magnitude
+
+
+class Gamma(nn.Module):
+    def __init__(self, gamma=2.2, eps=1e-8):
+        super().__init__()
+        self.gamma = gamma
+        self.eps = eps
+
+    def __repr__(self):
+        return f"Gamma(gamma={self.gamma}, eps={self.eps})"
+
+    def forward(self, x):
+        x_normalized = torch.abs(x) + self.eps
+        x_gamma = torch.pow(x_normalized, 1.0 / self.gamma)
+        return torch.sign(x) * x_gamma

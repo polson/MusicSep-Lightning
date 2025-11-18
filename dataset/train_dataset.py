@@ -181,13 +181,8 @@ class TrainDataset(IterableDataset):
         return Mixture(audios=audios)
 
     def _is_chunk_silent(self, data):
-        if data.ndim > 1:
-            rms_values = np.sqrt(np.mean(data ** 2, axis=1))
-            max_rms = np.max(rms_values)
-        else:
-            max_rms = np.sqrt(np.mean(data ** 2))
-
-        return max_rms < 0.001
+        max_peak = np.max(np.abs(data))
+        return max_peak < 0.01
 
     def _audio_to_tensor(self, audio):
         return torch.from_numpy(audio.copy()).float().contiguous()

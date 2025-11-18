@@ -8,6 +8,7 @@ from einops import rearrange
 from dataset.inference_dataset import InferenceDataset
 from dataset.train_dataset import TrainDataset
 from dataset.validation_dataset import TestSongDataset
+from model.bs_roformer.model import BSRoformer
 from model.magsep.model import MagSplitModel
 from optimizer import OptimizerFactory
 from separator import Separator
@@ -44,13 +45,25 @@ class AudioSourceSeparation(L.LightningModule):
         self.debug_targets = None
 
     def get_model(self, config):
-        return MagSplitModel(
-            num_instruments=len(config.training.target_sources),
-            n_fft=config.model.n_fft,
-            hop_length=config.model.hop_length,
-            layers=config.model.layers,
-            splits=config.model.splits,
-        )
+        if config.model.type == "MagSplitModel":
+            return MagSplitModel(
+                num_instruments=len(config.training.target_sources),
+                n_fft=config.model.n_fft,
+                hop_length=config.model.hop_length,
+                layers=config.model.layers,
+            )
+        elif config.model.type == "BSRoformer":
+            return BSRoformer(
+                num_instruments=len(config.training.target_sources),
+                n_fft=config.model.n_fft,
+                hop_length=config.model.hop_length,
+                layers=config.model.layers,
+                mask_layers=config.model.mask_layers,
+                dropout=config.model.dropout,
+                embed_dim=config.model.embed_dim,
+                freqs_per_bands=config.model.freqs_per_bands,
+            )
+        return None
 
     def on_train_start(self):
         val_mixture, val_targets = next(self.validation_iter)

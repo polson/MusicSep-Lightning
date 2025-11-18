@@ -9,6 +9,8 @@ from einops.layers.torch import Rearrange
 from modules.functional import STFT, ToMagnitude, FFT2d, ToSTFT
 from modules.seq import Seq
 
+import torch.nn as nn
+
 
 class LossInterface(ABC):
     @abstractmethod
@@ -25,7 +27,7 @@ class StftRmseLoss(LossInterface):
     def __init__(self):
         self.stft = Seq(
             Rearrange("b n c t -> (b n) c t"),
-            ToSTFT()
+            ToSTFT(),
         )
 
     def calculate(self, prediction, target):

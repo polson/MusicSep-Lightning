@@ -5,11 +5,11 @@ mode: train
 training:
   batch_size: 8
   duration: 8
-  num_steps: 1000
+  num_steps: 10000
   max_epochs: 1000
   optimizer: prodigy
   learning_rate: 1
-  seed: 89
+  seed: 190
   grad_accum: 1
   grad_clip: 1.0
   augment: true
@@ -18,11 +18,24 @@ training:
   precision: bf16-mixed
 
 #Model specific settings
+#Type can be: BSRoformer, MagSep
 model:
-  layers: 1
-  splits: 64
+  type: "BSRoformer"
   n_fft: 2048
   hop_length: 512
+  layers: 6
+  mask_layers: 1
+  dropout: 0.1
+  embed_dim: 64
+  freqs_per_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 128 ]
+
+#model:
+#  type: "MagSep"
+#  n_fft: 2048
+#  hop_length: 512
+#  layers: 6
+#  splits: 32
+
 
 # Paths for different modes
 paths:
@@ -33,23 +46,23 @@ paths:
   dataset: "/home/user/AudioSep/datasets/musdb18hq"
 
   # Optional: Where to save validation outputs for listening
-  # validation: "/home/user/AudioSep/validation"
+  validation: "/home/user/AudioSep/validation"
 
   # Optional: Resume training from a checkpoint
-  # resume_from: "/home/user/AudioSep/checkpoints/audio-separation-epoch=10-val_avg_sdr=6.4997.ckpt"
+  #resume_from: "/home/user/AudioSep/checkpoints/last-v263.ckpt"
 
   # Optional: Inference mode input folder, this must be used with resume_from option
-  # inference_input: "/home/user/AudioSep/datasets/musdb18hq_flac/test"
+  #inference_input: "/home/user/AudioSep/datasets/musdb18hq_flac/test"
 
 # Logging and debugging
 logging:
   wandb:
     enabled: false
     save_code: true # Uploads all code in the model directory to wandb
-  validate_every: 5 # Validation loss / sdr metric interval (0 to disable)
+  validate_every: 1 # Validation loss / sdr metric interval (0 to disable)
   debug_every: 1 # Debug visualization interval (0 to disable)
 
 inference:
   batch_size: 4
-  duration: 8
+  duration: 11
 

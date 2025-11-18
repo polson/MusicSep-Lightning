@@ -10,3 +10,5 @@ rich
 soundfile==0.13.1
 torch==2.8.0
 torchaudio==2.8.0
+wandb
+rotary_embedding_torch

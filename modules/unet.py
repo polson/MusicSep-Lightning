@@ -2,6 +2,7 @@ import torch
 from torch import nn
 
 from modules.functional import CFTShape
+from modules.seq import Seq
 
 
 class UNet(nn.Module):
@@ -72,12 +73,15 @@ class UNet(nn.Module):
                 t=current_shape.t // self.stride[1]
             )
             self.downsample_layers.append(
-                nn.Conv2d(
-                    in_channels=self.channels[i],
-                    out_channels=self.channels[i + 1],
-                    kernel_size=self.stride,
-                    stride=self.stride
-                )
+                Seq(
+                    nn.Conv2d(
+                        in_channels=self.channels[i],
+                        out_channels=self.channels[i + 1],
+                        kernel_size=self.stride,
+                        stride=self.stride
+                    ),
+                    nn.GELU(),
+                ),
             )
             if self.post_downsample_modules is not None:
                 self.post_downsample_modules.append(post_downsample_fn(output_shape))
