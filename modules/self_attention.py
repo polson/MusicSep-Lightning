@@ -31,8 +31,6 @@ class SelfAttention(nn.Module):
             self.head_dim += 1
             self.qkv_dim = num_heads * self.head_dim
 
-        self.scale = math.sqrt(self.head_dim)
-
         self.norm = nn.RMSNorm(embed_dim)
 
         if self.use_rope:
@@ -84,8 +82,7 @@ class SelfAttention(nn.Module):
             Q, K, V,
             attn_mask=attn_mask,
             dropout_p=self.dropout_p if self.training else 0.0,
-            is_causal=is_causal and context is None,
-            scale=1.0 / self.scale
+            is_causal=is_causal and context is None
         )
 
         gates = self.to_gates(x_norm)

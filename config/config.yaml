@@ -12,29 +12,29 @@ training:
   seed: 190
   grad_accum: 1
   grad_clip: 1.0
-  augment: true
+  augment: false
   target_sources:
     - vocals
   precision: bf16-mixed
 
 #Model specific settings
 #Type can be: BSRoformer, MagSep
-model:
-  type: "BSRoformer"
-  n_fft: 2048
-  hop_length: 512
-  layers: 6
-  mask_layers: 1
-  dropout: 0.1
-  embed_dim: 64
-  freqs_per_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 128 ]
-
 #model:
-#  type: "MagSep"
+#  type: "BSRoformer"
 #  n_fft: 2048
 #  hop_length: 512
-#  layers: 6
-#  splits: 32
+#  layers: 3
+#  mask_layers: 1
+#  dropout: 0.1
+#  embed_dim: 192
+#  freqs_per_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 128 ]
+
+model:
+  type: "MagSep"
+  n_fft: 2048
+  hop_length: 512
+  layers: 1
+  splits: 32
 
 
 # Paths for different modes

@@ -45,14 +45,17 @@ class AudioSourceSeparation(L.LightningModule):
         self.debug_targets = None
 
     def get_model(self, config):
-        if config.model.type == "MagSplitModel":
+        model_type = config.model.type
+
+        if model_type == "MagSplitModel":
             return MagSplitModel(
                 num_instruments=len(config.training.target_sources),
                 n_fft=config.model.n_fft,
                 hop_length=config.model.hop_length,
                 layers=config.model.layers,
+                splits=config.model.splits,
             )
-        elif config.model.type == "BSRoformer":
+        elif model_type == "BSRoformer":
             return BSRoformer(
                 num_instruments=len(config.training.target_sources),
                 n_fft=config.model.n_fft,
@@ -63,7 +66,11 @@ class AudioSourceSeparation(L.LightningModule):
                 embed_dim=config.model.embed_dim,
                 freqs_per_bands=config.model.freqs_per_bands,
             )
-        return None
+        else:
+            raise ValueError(
+                f"Unknown model type: '{model_type}'. "
+                "Supported types are 'MagSplitModel' and 'BSRoformer'."
+            )
 
     def on_train_start(self):
         val_mixture, val_targets = next(self.validation_iter)
