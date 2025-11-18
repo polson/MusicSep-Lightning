@@ -11,8 +11,8 @@ def _get_next_multiple(value, multiple):
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads=8, dropout=0.1, qkv_expand_dim=None,
-                 cross_attention=False, kv_embed_dim=None, use_rope=False, rope_base=10000):
+    def __init__(self, embed_dim, num_heads=8, dim_head=64, dropout=0.1,
+                 cross_attention=False, kv_embed_dim=None, use_rope=True, rope_base=10000):
         super(SelfAttention, self).__init__()
 
         self.embed_dim = embed_dim
@@ -22,20 +22,14 @@ class SelfAttention(nn.Module):
 
         self.kv_embed_dim = kv_embed_dim if kv_embed_dim is not None else embed_dim
 
-        if qkv_expand_dim is None:
-            self.qkv_dim = _get_next_multiple(embed_dim, num_heads)
-        else:
-            self.qkv_dim = qkv_expand_dim
+        # Use dim_head directly
+        self.head_dim = dim_head
+        self.qkv_dim = num_heads * dim_head
 
-        assert self.qkv_dim % num_heads == 0, f"qkv_dim ({self.qkv_dim}) must be divisible by num_heads ({num_heads})"
-        assert self.qkv_dim >= embed_dim, f"qkv_dim ({self.qkv_dim}) must be >= embed_dim ({embed_dim})"
-
-        self.head_dim = self.qkv_dim // num_heads
-
-        # Ensure head_dim is even for RoPE by padding qkv_dim if necessary
+        # Ensure head_dim is even for RoPE by padding if necessary
         if self.use_rope and self.head_dim % 2 != 0:
-            self.qkv_dim += num_heads  # Add 1 to each head dimension
-            self.head_dim = self.qkv_dim // num_heads
+            self.head_dim += 1
+            self.qkv_dim = num_heads * self.head_dim
 
         self.scale = math.sqrt(self.head_dim)
 
@@ -47,9 +41,14 @@ class SelfAttention(nn.Module):
                 theta=rope_base
             )
 
-        self.query = nn.Linear(embed_dim, self.qkv_dim, bias=False)
-        self.key = nn.Linear(self.kv_embed_dim, self.qkv_dim, bias=False)
-        self.value = nn.Linear(self.kv_embed_dim, self.qkv_dim, bias=False)
+        # Fused QKV for self-attention (when context is None)
+        self.qkv = nn.Linear(embed_dim, 3 * self.qkv_dim, bias=False)
+
+        # Separate projections for cross-attention (when context is provided)
+        if cross_attention:
+            self.query = nn.Linear(embed_dim, self.qkv_dim, bias=False)
+            self.key = nn.Linear(self.kv_embed_dim, self.qkv_dim, bias=False)
+            self.value = nn.Linear(self.kv_embed_dim, self.qkv_dim, bias=False)
 
         self.to_gates = nn.Linear(self.embed_dim, self.num_heads)
 
@@ -61,16 +60,17 @@ class SelfAttention(nn.Module):
 
     def forward(self, x, context=None, attn_mask=None, is_causal=False):
         x_norm = self.norm(x)
-        if context is not None:
-            kv_source = context
-            # Normalize context as well if doing cross-attention
-            kv_source_norm = self.norm(kv_source)
-        else:
-            kv_source_norm = x_norm
 
-        Q = self.query(x_norm)
-        K = self.key(kv_source_norm)
-        V = self.value(kv_source_norm)
+        if context is not None:
+            # Cross-attention path: use separate Q, K, V projections
+            kv_source_norm = self.norm(context)
+            Q = self.query(x_norm)
+            K = self.key(kv_source_norm)
+            V = self.value(kv_source_norm)
+        else:
+            # Self-attention path: use fused QKV projection
+            qkv = self.qkv(x_norm)
+            Q, K, V = qkv.chunk(3, dim=-1)
 
         Q = rearrange(Q, 'b n (h d) -> b h n d', h=self.num_heads)
         K = rearrange(K, 'b n (h d) -> b h n d', h=self.num_heads)
@@ -88,8 +88,7 @@ class SelfAttention(nn.Module):
             scale=1.0 / self.scale
         )
 
-        # Apply gating using the original (non-normalized) input
-        gates = self.to_gates(x)
+        gates = self.to_gates(x_norm)
         attn_output = attn_output * rearrange(gates, 'b n h -> b h n 1').sigmoid()
 
         output = rearrange(attn_output, 'b h n d -> b n (h d)')

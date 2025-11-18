@@ -534,30 +534,29 @@ class SideEffect(nn.Module):
         return x
 
 
+import torch
+import torch.nn as nn
+from einops import rearrange
+
+
 class ComplexMask(nn.Module):
     def __init__(self, *args):
         super().__init__()
-        self.fn = Seq(*args)
-
-    def __repr__(self):
-        return f"ComplexMask(fn={self.fn})"
+        self.fn = nn.Sequential(*args)  # Assuming Seq is nn.Sequential
 
     def forward(self, x):
         b, c, f, t = x.shape
-        assert c % 2 == 0, "Channel dimension must be even for real/imag pairs"
-        original_dtype = x.dtype
-        x_float32 = x.float()
-        x_complex = rearrange(x_float32, 'b (ch ri) f t -> b ch f t ri', ri=2)
-        residual = torch.view_as_complex(x_complex.contiguous())
-        x_processed = self.fn(x)
-        x_processed_float32 = x_processed.float()
-        x_processed_complex = rearrange(x_processed_float32, 'b (ch ri) f t -> b ch f t ri', ri=2)
-        x_processed = torch.view_as_complex(x_processed_complex.contiguous())
-        result = residual * x_processed
-        result_real = torch.view_as_real(result)
+        x_complex = torch.view_as_complex(
+            rearrange(x.float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
+        )
+        mask_out = self.fn(x)
+        mask_complex = torch.view_as_complex(
+            rearrange(mask_out.float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
+        )
+        result_complex = x_complex * mask_complex
+        result_real = torch.view_as_real(result_complex)
         result = rearrange(result_real, 'b ch f t ri -> b (ch ri) f t')
-        result = result.to(original_dtype)
-        return result
+        return result.type_as(x)
 
 
 class FFT1dAndInverse(nn.Module):

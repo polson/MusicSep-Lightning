@@ -4,11 +4,12 @@ from einops import rearrange
 
 
 class STFT(nn.Module):
-    def __init__(self, n_fft: int, hop_length: int):
+    def __init__(self, n_fft: int, hop_length: int, normalized: bool = False):
         super().__init__()
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = n_fft
+        self.normalized = normalized
         self.register_buffer('window', torch.hann_window(self.win_length))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -22,7 +23,7 @@ class STFT(nn.Module):
             win_length=self.win_length,
             window=self.window.to(dtype=original_dtype, device=x.device),
             center=True,
-            normalized=True,
+            normalized=self.normalized,
             return_complex=True
         )
         x = torch.view_as_real(x)
@@ -45,7 +46,7 @@ class STFT(nn.Module):
             win_length=self.win_length,
             window=window_float32,
             center=True,
-            normalized=True,
+            normalized=self.normalized,
             length=length
         )
         x = rearrange(x, '(b c) t -> b c t', b=b, c=c)
