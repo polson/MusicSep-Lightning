@@ -43,11 +43,12 @@ class AudioSourceSeparation(L.LightningModule):
         )
         self.debug_mixture = None
         self.debug_targets = None
+        self.num_instruments = len(config.training.target_sources)
 
     def get_model(self, config):
         model_type = config.model.type
 
-        if model_type == "MagSplitModel":
+        if model_type == "MagSep":
             return MagSplitModel(
                 num_instruments=len(config.training.target_sources),
                 n_fft=config.model.n_fft,
@@ -75,7 +76,7 @@ class AudioSourceSeparation(L.LightningModule):
     def on_train_start(self):
         val_mixture, val_targets = next(self.validation_iter)
         val_mixture = rearrange(val_mixture, "c t -> 1 c t").to(self.device)
-        val_targets = rearrange(val_targets, "1 c t -> 1 1 c t").to(self.device)
+        val_targets = rearrange(val_targets, "n c t -> 1 n c t", n=self.num_instruments).to(self.device)
         self.debug_mixture = val_mixture
         self.debug_targets = val_targets
 
@@ -108,7 +109,7 @@ class AudioSourceSeparation(L.LightningModule):
         if validate_every != 0 and self.global_step % validate_every == 0:
             val_mixture, val_targets = next(self.validation_iter)
             val_mixture = rearrange(val_mixture, "c t -> 1 c t").to(self.device)
-            val_targets = rearrange(val_targets, "1 c t -> 1 1 c t").to(self.device)
+            val_targets = rearrange(val_targets, "n c t -> 1 n c t", n=self.num_instruments).to(self.device)
             self.model.eval()
             val_separated, val_loss = self.model(val_mixture, val_targets)
             self.model.train()

@@ -25,13 +25,14 @@ class BaseModel(nn.Module, ABC):
             ),
         )
 
+        self.loss_factory = LossFactory.create(LossType.STFT_RMSE)
+
     @abstractmethod
     def process(self, x):
         pass
 
     def loss(self, x, targets, mixture):
-        loss_factory = LossFactory.create(LossType.STFT_RMSE)
-        return loss_factory.calculate(x, targets)
+        return self.loss_factory.calculate(x, targets)
 
     def forward(self, x, targets=None):
         mixture = x

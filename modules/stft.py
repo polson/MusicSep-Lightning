@@ -4,7 +4,7 @@ from einops import rearrange
 
 
 class STFT(nn.Module):
-    def __init__(self, n_fft: int, hop_length: int, normalized: bool = False):
+    def __init__(self, n_fft: int, hop_length: int, normalized: bool = True):
         super().__init__()
         self.n_fft = n_fft
         self.hop_length = hop_length

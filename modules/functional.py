@@ -68,7 +68,12 @@ class Mask(nn.Module):
         return f"Mask(fn={self.fn})"
 
     def forward(self, x):
-        return self.fn(x) * x
+        mixture = x
+        x = self.fn(x)
+        num_multiplies = x.shape[1] // mixture.shape[1]
+        mixture = mixture.repeat(1, num_multiplies, 1, 1)
+        x = x * mixture
+        return x
 
 
 class Scale(nn.Module):
@@ -868,22 +873,32 @@ class ToMagnitudeAndInverse(nn.Module):
         real_parts = x[:, 0::2, :, :]
         imag_parts = x[:, 1::2, :, :]
         magnitude = torch.sqrt(real_parts ** 2 + imag_parts ** 2 + self.eps)
+        processed_magnitude = self.fn(magnitude)
+        expansion = processed_magnitude.shape[1] // magnitude.shape[1]
 
         if self.retain_phase:
             phase = torch.atan2(imag_parts, real_parts)
-            processed_magnitude = self.fn(magnitude)
-            new_real = processed_magnitude * torch.cos(phase)
-            new_imag = processed_magnitude * torch.sin(phase)
+
+            # Channels may have expanded if separating multiple instruments
+            phase_expanded = phase.repeat_interleave(expansion, dim=1)
+            new_real = processed_magnitude * torch.cos(phase_expanded)
+            new_imag = processed_magnitude * torch.sin(phase_expanded)
         else:
             processed_magnitude = self.fn(magnitude)
-            scale_factor = processed_magnitude / (magnitude + self.eps)
-            new_real = real_parts * scale_factor
-            new_imag = imag_parts * scale_factor
+            mask = processed_magnitude / (magnitude + self.eps)
 
-        output = torch.zeros_like(x)
+            # Channels may have expanded if separating multiple instruments
+            real_expanded = real_parts.repeat_interleave(expansion, dim=1)
+            imag_expanded = imag_parts.repeat_interleave(expansion, dim=1)
+            new_real = real_expanded * mask
+            new_imag = imag_expanded * mask
+
+        # Create output interleaving real and imaginary
+        batch, out_channels, freq, time = new_real.shape
+        output = torch.zeros(batch, out_channels * 2, freq, time,
+                             dtype=new_real.dtype, device=new_real.device)
         output[:, 0::2, :, :] = new_real
         output[:, 1::2, :, :] = new_imag
-
         return output
 
 

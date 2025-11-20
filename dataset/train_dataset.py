@@ -73,7 +73,6 @@ class TrainDataset(IterableDataset):
 
                 yield mixture_audio, targets_tensor
             except Exception as e:
-                print(f"Warning: Skipping sample due to error: {e}")
                 continue
 
     def _group_wavs_by_file_stem(self) -> Dict[str, List[WavMetadata]]:
@@ -182,7 +181,7 @@ class TrainDataset(IterableDataset):
 
     def _is_chunk_silent(self, data):
         max_peak = np.max(np.abs(data))
-        return max_peak < 0.01
+        return max_peak < 0.1
 
     def _audio_to_tensor(self, audio):
         return torch.from_numpy(audio.copy()).float().contiguous()
