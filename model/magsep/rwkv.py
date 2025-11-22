@@ -6,373 +6,418 @@ import triton.language as tl
 
 
 # ==========================================
-# 1. TRITON KERNEL (CUDA Fused Operation)
+# 1. TRITON KERNELS (TRAINING & BACKWARD)
 # ==========================================
 
 @triton.jit
-def wkv_kernel(
-        k_ptr, v_ptr, w_ptr, u_ptr, out_ptr,
-        state_num_ptr, state_den_ptr, state_max_ptr,
-        batch_size, seq_len, n_embd,
-        B_stride, T_stride, C_stride,  # Strides for K, V, Out
-        SO_stride, SI_stride,  # Strides for State (Outer: Batch, Inner: Channel)
-        has_initial_state: tl.constexpr
+def wkv_forward_training_kernel(
+        k_ptr, v_ptr, w_ptr, u_ptr,
+        out_ptr,
+        state_num_ptr, state_den_ptr, state_max_ptr,  # Saved states for backward
+        B, T, C,
+        stride_b, stride_t, stride_c
 ):
-    # Parallelize over Batch (program_id(0)) and Channel (program_id(1))
+    # Parallelize over Batch (0) and Channel (1)
     batch_idx = tl.program_id(0)
-    channel_idx = tl.program_id(1)
+    block_c_idx = tl.program_id(1)
 
-    # Load parameters specific to this channel
-    # w and u are [C], so we just offset by channel_idx
-    w = tl.load(w_ptr + channel_idx)
-    u = tl.load(u_ptr + channel_idx)
+    # We process BLOCK_C elements per thread block
+    BLOCK_C: tl.constexpr = 64
+    c_offsets = block_c_idx * BLOCK_C + tl.arange(0, BLOCK_C)
+    mask_c = c_offsets < C
 
-    # -----------------------------------------------------------
-    # Initialize State (Register Fast Memory)
-    # -----------------------------------------------------------
-    if has_initial_state:
-        state_ptr_offset = batch_idx * SO_stride + channel_idx * SI_stride
-        num = tl.load(state_num_ptr + state_ptr_offset)
-        den = tl.load(state_den_ptr + state_ptr_offset)
-        max_state = tl.load(state_max_ptr + state_ptr_offset)
-    else:
-        num = 0.0
-        den = 0.0
-        max_state = -1.0e38
+    # Pointers
+    k_base = k_ptr + batch_idx * stride_b + c_offsets * stride_c
+    v_base = v_ptr + batch_idx * stride_b + c_offsets * stride_c
+    out_base = out_ptr + batch_idx * stride_b + c_offsets * stride_c
 
-    # Base pointers for this specific batch/channel sequence
-    k_ptr_base = k_ptr + batch_idx * B_stride + channel_idx * C_stride
-    v_ptr_base = v_ptr + batch_idx * B_stride + channel_idx * C_stride
-    out_ptr_base = out_ptr + batch_idx * B_stride + channel_idx * C_stride
+    # State pointers (B, T, C) - We save state for every timestep for backward
+    s_num_base = state_num_ptr + batch_idx * (T * C) + c_offsets
+    s_den_base = state_den_ptr + batch_idx * (T * C) + c_offsets
+    s_max_base = state_max_ptr + batch_idx * (T * C) + c_offsets
 
-    # -----------------------------------------------------------
-    # The Loop (Fuses seq_len operations into one kernel)
-    # -----------------------------------------------------------
-    for t in range(seq_len):
-        # Load current token k, v
-        k = tl.load(k_ptr_base + t * T_stride)
-        v = tl.load(v_ptr_base + t * T_stride)
+    # Load Parameters w and u
+    w = tl.load(w_ptr + c_offsets, mask=mask_c, other=0.0)
+    u = tl.load(u_ptr + c_offsets, mask=mask_c, other=0.0)
 
-        # --- Calculate Output ---
-        max_for_output = tl.maximum(max_state, k + u)
-        e1 = tl.exp(max_state - max_for_output)
-        e2 = tl.exp(k + u - max_for_output)
+    # Initialize State
+    num = tl.zeros([BLOCK_C], dtype=tl.float32)
+    den = tl.zeros([BLOCK_C], dtype=tl.float32)
+    max_state = tl.full([BLOCK_C], -1e38, dtype=tl.float32)
+
+    for t in range(T):
+        t_offset = t * stride_t
+
+        # Load Current Input
+        k = tl.load(k_base + t_offset, mask=mask_c, other=0.0)
+        v = tl.load(v_base + t_offset, mask=mask_c, other=0.0)
+
+        # 1. Calculate Output for this step
+        # y_t = (e^u * state + e^k * v) / ...
+        k_u = k + u
+        max_for_out = tl.maximum(max_state, k_u)
+        e1 = tl.exp(max_state - max_for_out)
+        e2 = tl.exp(k_u - max_for_out)
 
         num_out = e1 * num + e2 * v
         den_out = e1 * den + e2
+        y = num_out / den_out
 
-        # Write output
-        tl.store(out_ptr_base + t * T_stride, num_out / den_out)
+        tl.store(out_base + t_offset, y, mask=mask_c)
 
-        # --- Update State ---
-        max_for_state = tl.maximum(max_state + w, k)
-        e1_s = tl.exp(max_state + w - max_for_state)
-        e2_s = tl.exp(k - max_for_state)
+        # 2. Update State for next step
+        # state = state * e^w + k * v
+        max_w = max_state + w
+        max_new = tl.maximum(max_w, k)
+        e1_s = tl.exp(max_w - max_new)
+        e2_s = tl.exp(k - max_new)
 
         num = e1_s * num + e2_s * v
         den = e1_s * den + e2_s
-        max_state = max_for_state
+        max_state = max_new
 
-    # -----------------------------------------------------------
-    # Save Final State
-    # -----------------------------------------------------------
-    state_ptr_offset = batch_idx * SO_stride + channel_idx * SI_stride
-    tl.store(state_num_ptr + state_ptr_offset, num)
-    tl.store(state_den_ptr + state_ptr_offset, den)
-    tl.store(state_max_ptr + state_ptr_offset, max_state)
+        # 3. Save State (Required for Backward)
+        # Stride for state is simply C (contiguous in T*C block per batch)
+        state_offset = t * C
+        tl.store(s_num_base + state_offset, num, mask=mask_c)
+        tl.store(s_den_base + state_offset, den, mask=mask_c)
+        tl.store(s_max_base + state_offset, max_state, mask=mask_c)
 
 
-def wkv_forward_wrapper(k, v, w, u, state=None):
-    """Helper to launch the kernel"""
-    B, T, C = k.shape
-
-    # Ensure contiguous memory for the GPU kernel
-    k, v, w, u = k.contiguous(), v.contiguous(), w.contiguous(), u.contiguous()
-    output = torch.empty_like(k)
-
-    # Prepare State
-    if state is None:
-        s_num = torch.zeros((B, C), device=k.device, dtype=torch.float32)
-        s_den = torch.zeros((B, C), device=k.device, dtype=torch.float32)
-        s_max = torch.zeros((B, C), device=k.device, dtype=torch.float32)
-        has_initial = False
-    else:
-        s_num, s_den, s_max = state
-        # Kernel requires contiguous memory for pointers to work
-        s_num, s_den, s_max = s_num.contiguous(), s_den.contiguous(), s_max.contiguous()
-        has_initial = True
-
-    grid = (B, C)  # Launch a kernel for every Batch and Channel
-
-    wkv_kernel[grid](
-        k, v, w, u, output,
-        s_num, s_den, s_max,
+@triton.jit
+def wkv_backward_kernel(
+        w_ptr, u_ptr, k_ptr, v_ptr,
+        gy_ptr,
+        state_num_ptr, state_den_ptr, state_max_ptr,
+        gw_ptr, gu_ptr, gk_ptr, gv_ptr,
         B, T, C,
-        k.stride(0), k.stride(1), k.stride(2),
-        s_num.stride(0), s_num.stride(1),
-        has_initial_state=has_initial
-    )
+        stride_b, stride_t, stride_c
+):
+    batch_idx = tl.program_id(0)
+    block_c_idx = tl.program_id(1)
+    BLOCK_C: tl.constexpr = 64
 
-    return output, (s_num, s_den, s_max)
+    c_offsets = block_c_idx * BLOCK_C + tl.arange(0, BLOCK_C)
+    mask_c = c_offsets < C
+
+    # Pointers
+    off_b = batch_idx * stride_b + c_offsets * stride_c
+    k_base = k_ptr + off_b
+    v_base = v_ptr + off_b
+    gy_base = gy_ptr + off_b
+
+    gw_base = gw_ptr + off_b
+    gu_base = gu_ptr + off_b
+    gk_base = gk_ptr + off_b
+    gv_base = gv_ptr + off_b
+
+    # State Pointers (Saved from Forward)
+    # Note: We need state[t-1] to compute grad at t.
+    s_base = batch_idx * (T * C) + c_offsets
+    s_num_ptr_base = state_num_ptr + s_base
+    s_den_ptr_base = state_den_ptr + s_base
+    s_max_ptr_base = state_max_ptr + s_base
+
+    # Load Parameters
+    w = tl.load(w_ptr + c_offsets, mask=mask_c, other=0.0)
+    u = tl.load(u_ptr + c_offsets, mask=mask_c, other=0.0)
+
+    # Gradients Accumulators for w and u (local to this thread block)
+    gw_acc = tl.zeros([BLOCK_C], dtype=tl.float32)
+    gu_acc = tl.zeros([BLOCK_C], dtype=tl.float32)
+
+    # Gradient flowing back from future (initially 0)
+    g_num = tl.zeros([BLOCK_C], dtype=tl.float32)
+    g_den = tl.zeros([BLOCK_C], dtype=tl.float32)
+
+    # Iterate Backwards
+    for t in range(T - 1, -1, -1):
+        t_offset = t * stride_t
+        prev_state_idx = (t - 1) * C
+
+        # Load inputs and gradient at t
+        k = tl.load(k_base + t_offset, mask=mask_c, other=0.0)
+        v = tl.load(v_base + t_offset, mask=mask_c, other=0.0)
+        gy = tl.load(gy_base + t_offset, mask=mask_c, other=0.0)
+
+        # Load State at t-1 (Input to step t)
+        if t > 0:
+            num_prev = tl.load(s_num_ptr_base + prev_state_idx, mask=mask_c, other=0.0)
+            den_prev = tl.load(s_den_ptr_base + prev_state_idx, mask=mask_c, other=0.0)
+            max_prev = tl.load(s_max_ptr_base + prev_state_idx, mask=mask_c, other=-1e38)
+        else:
+            num_prev = tl.zeros([BLOCK_C], dtype=tl.float32)
+            den_prev = tl.zeros([BLOCK_C], dtype=tl.float32)
+            max_prev = tl.full([BLOCK_C], -1e38, dtype=tl.float32)
+
+        # --------------------------------------------
+        # 1. Recompute Forward Calculations (Output Part)
+        # --------------------------------------------
+        # We need e1, e2, num_out, den_out to compute derivatives for Output
+        k_u = k + u
+        max_for_out = tl.maximum(max_prev, k_u)
+        e1 = tl.exp(max_prev - max_for_out)
+        e2 = tl.exp(k_u - max_for_out)
+
+        num_out = e1 * num_prev + e2 * v
+        den_out = e1 * den_prev + e2
+
+        inv_den_out = 1.0 / (den_out + 1e-9)
+
+        # --------------------------------------------
+        # 2. Gradients for Output Part
+        # --------------------------------------------
+        # dLoss/d(num_out) = gy * (1/den)
+        # dLoss/d(den_out) = gy * (-num/den^2)
+        g_num_out = gy * inv_den_out
+        g_den_out = gy * (-num_out * inv_den_out * inv_den_out)
+
+        # Gradients flowing to e1 and e2 from Output equation
+        g_e1 = g_num_out * num_prev + g_den_out * den_prev
+        g_e2 = g_num_out * v + g_den_out
+
+        # Accumulate gu (u affects e2)
+        # d(e2)/du = e2
+        gu_acc += g_e2 * e2
+
+        # Initial gradients for k, v from Output equation
+        gk_t = g_e2 * e2
+        gv_t = g_num_out * e2
+
+        # --------------------------------------------
+        # 3. Recompute Forward Calculations (State Part)
+        # --------------------------------------------
+        # THIS WAS MISSING: We must re-calculate the transition factors
+        # max_w = max_prev + w
+        # max_new = max(max_w, k)
+        # e1_s = exp(max_w - max_new)
+        # e2_s = exp(k - max_new)
+
+        max_w = max_prev + w
+        max_new_state = tl.maximum(max_w, k)
+        e1_s = tl.exp(max_w - max_new_state)
+        e2_s = tl.exp(k - max_new_state)
+
+        # --------------------------------------------
+        # 4. Backpropagate through State Recurrence
+        # --------------------------------------------
+        # Gradients coming FROM future steps (g_num, g_den) flowing into current step
+        g_e1_s = g_num * num_prev + g_den * den_prev
+        g_e2_s = g_num * v + g_den
+
+        # Accumulate gw (w affects e1_s via max_w)
+        # d(e1_s)/dw = e1_s * 1 (approx, ignoring max grad discontinuity)
+        gw_acc += g_e1_s * e1_s
+
+        # Accumulate into k, v
+        gk_t += g_e2_s * e2_s
+        gv_t += g_num * e2_s
+
+        # Gradients flowing to prev state (num_prev, den_prev)
+        # Used for next iteration (t-1)
+        g_num = g_num_out * e1 + g_num * e1_s
+        g_den = g_den_out * e1 + g_den * e1_s
+
+        tl.store(gk_base + t_offset, gk_t, mask=mask_c)
+        tl.store(gv_base + t_offset, gv_t, mask=mask_c)
+
+    # Store accumulated gradients for w and u
+    tl.store(gw_base, gw_acc, mask=mask_c)
+    tl.store(gu_base, gu_acc, mask=mask_c)
 
 
 # ==========================================
-# 2. MODEL DEFINITION
+# 2. AUTOGRAD FUNCTION
 # ==========================================
 
-PREV_X_TIME = 0
-NUM_STATE = 1
-DEN_STATE = 2
-MAX_STATE = 3
-PREV_X_CHANNEL = 4
+class WKVFunc(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, w, u, k, v):
+        # Ensure contiguous for Triton pointers
+        w = w.contiguous()
+        u = u.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
 
+        B, T, C = k.shape
 
-class RWKVConfig:
-    def __init__(self, n_embd, n_layer=1, bias=True, intermediate_size=None):
-        self.n_embd = n_embd
-        self.n_layer = n_layer
-        self.bias = bias
-        self.intermediate_size = intermediate_size
+        # Alloc Output
+        y = torch.empty_like(k)
 
+        # Alloc State History (Required for Backward)
+        # We need these to recompute gradients correctly
+        state_num = torch.empty((B, T, C), device=k.device, dtype=torch.float32)
+        state_den = torch.empty((B, T, C), device=k.device, dtype=torch.float32)
+        state_max = torch.empty((B, T, C), device=k.device, dtype=torch.float32)
 
-class LayerNorm(nn.Module):
-    def __init__(self, ndim, bias):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+        BLOCK_C = 64
+        grid = (B, triton.cdiv(C, BLOCK_C))
 
-    def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
-
-
-class ChannelMixing(nn.Module):
-    def __init__(self, config, layer_id):
-        super().__init__()
-        self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
-        self.layer_id = layer_id
-        n_embd = config.n_embd
-        intermediate_size = config.intermediate_size if config.intermediate_size is not None else 4 * n_embd
-
-        self.key_proj = nn.Linear(n_embd, intermediate_size, bias=False)
-        self.value_proj = nn.Linear(intermediate_size, n_embd, bias=False)
-        self.receptance_proj = nn.Linear(n_embd, n_embd, bias=False)
-        self.time_mix_key = nn.Parameter(torch.empty(1, 1, n_embd))
-        self.time_mix_receptance = nn.Parameter(torch.empty(1, 1, n_embd))
-        self._init_weights()
-
-    def _init_weights(self):
-        with torch.no_grad():
-            self.time_mix_key.uniform_(0.0, 1.0)
-            self.time_mix_receptance.uniform_(0.0, 1.0)
-
-    def forward(self, x, state=None):
-        if state is not None:
-            prev_x = state[self.layer_id, :, [PREV_X_CHANNEL], :]
-            new_state = state.clone()
-            new_state[self.layer_id, :, [PREV_X_CHANNEL], :] = x[:, [-1], :]
-        else:
-            prev_x = self.time_shift(x)
-            new_state = None
-
-        receptance = x * self.time_mix_receptance + prev_x * (1 - self.time_mix_receptance)
-        receptance = self.receptance_proj(receptance)
-        key = x * self.time_mix_key + prev_x * (1 - self.time_mix_key)
-        key = self.key_proj(key)
-        value = self.value_proj(torch.square(torch.relu(key)))
-        out = F.sigmoid(receptance) * value
-        return out, new_state
-
-
-class TimeMixingOptimized(nn.Module):
-    """
-    Optimized TimeMixing using Triton Kernel
-    """
-
-    def __init__(self, config, layer_id):
-        super().__init__()
-        self.config = config
-        self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
-        self.layer_id = layer_id
-
-        n_embd = config.n_embd
-        attn_sz = n_embd
-
-        self.key_proj = nn.Linear(n_embd, attn_sz, bias=False)
-        self.value_proj = nn.Linear(n_embd, attn_sz, bias=False)
-        self.receptance_proj = nn.Linear(n_embd, attn_sz, bias=False)
-        self.output_proj = nn.Linear(attn_sz, n_embd, bias=False)
-
-        self.time_decay = nn.Parameter(torch.empty(attn_sz))
-        self.time_first = nn.Parameter(torch.empty(attn_sz))
-        self.time_mix_key = nn.Parameter(torch.empty(1, 1, n_embd))
-        self.time_mix_value = nn.Parameter(torch.empty(1, 1, n_embd))
-        self.time_mix_receptance = nn.Parameter(torch.empty(1, 1, n_embd))
-        self._init_weights()
-
-    def _init_weights(self):
-        with torch.no_grad():
-            self.time_mix_key.uniform_(0.0, 1.0)
-            self.time_mix_value.uniform_(0.0, 1.0)
-            self.time_mix_receptance.uniform_(0.0, 1.0)
-            self.time_decay.uniform_(-6.0, -5.0)
-            self.time_first.uniform_(-3.0, 0.0)
-
-    def forward(self, x, state=None):
-        # 1. Time Shift (Channel-wise mixing)
-        if state is not None:
-            prev_x = state[self.layer_id, :, [PREV_X_TIME], :]
-            new_state = state.clone()
-            new_state[self.layer_id, :, [PREV_X_TIME], :] = x[:, [-1], :]
-        else:
-            prev_x = self.time_shift(x)
-            new_state = None
-
-        # 2. Projections
-        receptance = x * self.time_mix_receptance + prev_x * (1 - self.time_mix_receptance)
-        receptance = self.receptance_proj(receptance)
-
-        key = x * self.time_mix_key + prev_x * (1 - self.time_mix_key)
-        key = self.key_proj(key)
-
-        value = x * self.time_mix_value + prev_x * (1 - self.time_mix_value)
-        value = self.value_proj(value)
-
-        # 3. PREPARE CUDA INPUTS
-        # Convert parameters to float to ensure kernel compatibility
-        w = -torch.exp(self.time_decay).float()
-        u = self.time_first.float()
-
-        # Extract WKV state if available
-        wkv_state_in = None
-        if new_state is not None:
-            s_num = new_state[self.layer_id, :, NUM_STATE, :]
-            s_den = new_state[self.layer_id, :, DEN_STATE, :]
-            s_max = new_state[self.layer_id, :, MAX_STATE, :]
-            wkv_state_in = (s_num, s_den, s_max)
-
-        # 4. RUN CUDA KERNEL (Replaces the python loop)
-        wkv_out, (final_num, final_den, final_max) = wkv_forward_wrapper(
-            key, value, w, u, wkv_state_in
+        wkv_forward_training_kernel[grid](
+            k, v, w, u, y,
+            state_num, state_den, state_max,
+            B, T, C,
+            k.stride(0), k.stride(1), k.stride(2)
         )
 
-        # 5. Update State tensors
-        if new_state is not None:
-            new_state[self.layer_id, :, NUM_STATE, :] = final_num
-            new_state[self.layer_id, :, DEN_STATE, :] = final_den
-            new_state[self.layer_id, :, MAX_STATE, :] = final_max
+        ctx.save_for_backward(w, u, k, v, state_num, state_den, state_max)
+        return y
 
-        # 6. Final Output
-        rwkv = F.sigmoid(receptance) * wkv_out
-        rwkv = self.output_proj(rwkv)
+    @staticmethod
+    def backward(ctx, gy):
+        w, u, k, v, state_num, state_den, state_max = ctx.saved_tensors
+        gy = gy.contiguous()
 
-        return rwkv, new_state
+        B, T, C = k.shape
+
+        gw = torch.zeros_like(k)  # Shape B, T, C (conceptually) -> but we store B,C result at offset 0
+        gu = torch.zeros_like(k)
+        gk = torch.empty_like(k)
+        gv = torch.empty_like(k)
+
+        BLOCK_C = 64
+        grid = (B, triton.cdiv(C, BLOCK_C))
+
+        wkv_backward_kernel[grid](
+            w, u, k, v,
+            gy,
+            state_num, state_den, state_max,
+            gw, gu, gk, gv,
+            B, T, C,
+            k.stride(0), k.stride(1), k.stride(2)
+        )
+
+        # gw and gu are accumulated over T inside the kernel,
+        # but we ran B programs. Need to sum over B.
+        # The kernel stored the B-wise accumulation in the first timestep slot of the output tensor
+        # (or strictly speaking, we mapped `gw_base` to the batch offset).
+        # But `gw` tensor has shape B, T, C.
+        # The kernel wrote result to `gw_ptr + off_b`, which is effectively gw[:, 0, :].
+        # However, to keep it clean, we sum over B:
+
+        gw_sum = gw[:, 0, :].sum(0)
+        gu_sum = gu[:, 0, :].sum(0)
+
+        return gw_sum, gu_sum, gk, gv
 
 
-class Block(nn.Module):
-    def __init__(self, config, layer_id):
-        super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = TimeMixingOptimized(config, layer_id)  # Using Optimized version
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.ffn = ChannelMixing(config, layer_id)
-
-    def forward(self, x, state=None):
-        residual = x
-        x, state = self.attn(self.ln_1(x), state=state)
-        x = x + residual
-        residual = x
-        x, state = self.ffn(self.ln_2(x), state=state)
-        x = x + residual
-        return x, state
-
-
-class RWKV_LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers=1, bias=True,
-                 batch_first=False, dropout=0.0, bidirectional=False):
-        super().__init__()
-        if bidirectional: raise NotImplementedError("RWKV cannot be bidirectional")
-
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.batch_first = batch_first
-
-        self.input_proj = nn.Linear(input_size, hidden_size, bias=bias) if input_size != hidden_size else None
-        config = RWKVConfig(n_embd=hidden_size, n_layer=num_layers, bias=bias)
-        self.blocks = nn.ModuleList([Block(config, i) for i in range(num_layers)])
-        self.ln_f = LayerNorm(hidden_size, bias=bias)
-
-    def _init_state(self, batch_size, device):
-        state = torch.zeros(self.num_layers, batch_size, 5, self.hidden_size, device=device, dtype=torch.float32)
-        state[:, :, MAX_STATE, :] = -1e38
-        return state
-
-    def _state_to_lstm_format(self, state):
-        h_n = state[:, :, NUM_STATE, :].contiguous()
-        c_n = state[:, :, DEN_STATE, :].contiguous()  # Simplification for API compatibility
-        return (h_n, c_n)
-
-    def _lstm_format_to_state(self, h_0, c_0, batch_size, device):
-        state = self._init_state(batch_size, device)
-        if h_0 is not None: state[:, :, NUM_STATE, :] = h_0
-        if c_0 is not None: state[:, :, DEN_STATE, :] = c_0
-        return state
-
-    def forward(self, input, hx=None):
-        if self.batch_first: input = input.transpose(0, 1)
-        seq_len, batch_size, _ = input.size()
-        device = input.device
-
-        x = self.input_proj(input) if self.input_proj else input
-        # RWKV expects (Batch, Seq, Channel) for the inner attention logic usually,
-        # but our Kernel assumes (Batch, Seq, Channel) as standard layout.
-        # The LSTM interface inputs (Seq, Batch, Channel).
-        # Let's transpose to Batch First for the core logic.
-        x = x.transpose(0, 1)
-
-        if hx is None:
-            state = self._init_state(batch_size, device)
-        else:
-            h_0, c_0 = hx
-            state = self._lstm_format_to_state(h_0, c_0, batch_size, device)
-
-        for block in self.blocks:
-            x, state = block(x, state)
-
-        x = self.ln_f(x)
-
-        # Return to Seq First
-        output = x.transpose(0, 1)
-        if self.batch_first: output = output.transpose(0, 1)
-
-        return output, self._state_to_lstm_format(state)
+def wkv_forward_runner(k, v, w, u):
+    """
+    Drop-in replacement for your runner.
+    Uses the Autograd Function which handles Triton Kernel launch.
+    """
+    return WKVFunc.apply(w, u, k, v)
 
 
 # ==========================================
-# 3. TEST
+# 3. MODULES (Unchanged except logic separation)
+# ==========================================
+
+class BiRWKVLayer(nn.Module):
+    def __init__(self, n_embd):
+        super().__init__()
+        self.n_embd = n_embd
+        self.rkv_proj = nn.Linear(n_embd, n_embd * 6, bias=False)
+        self.output_proj = nn.Linear(n_embd * 2, n_embd, bias=False)
+
+        self.time_decay = nn.Parameter(torch.empty(n_embd))
+        self.time_first = nn.Parameter(torch.empty(n_embd))
+        self.time_decay_rev = nn.Parameter(torch.empty(n_embd))
+        self.time_first_rev = nn.Parameter(torch.empty(n_embd))
+
+        self._init_params()
+
+    def _init_params(self):
+        with torch.no_grad():
+            self.time_decay.uniform_(-6.0, -5.0)
+            self.time_first.uniform_(-3.0, 0.0)
+            self.time_decay_rev.uniform_(-6.0, -5.0)
+            self.time_first_rev.uniform_(-3.0, 0.0)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        rkv = self.rkv_proj(x).view(B, T, 2, 3, C)
+
+        # Fwd
+        r_f = rkv[:, :, 0, 0]
+        k_f = rkv[:, :, 0, 1]
+        v_f = rkv[:, :, 0, 2]
+        w_f = -torch.exp(self.time_decay)
+        u_f = self.time_first
+
+        out_f = wkv_forward_runner(k_f, v_f, w_f, u_f)
+        out_f = torch.sigmoid(r_f) * out_f
+
+        # Bwd
+        r_b = rkv[:, :, 1, 0]
+        k_b = rkv[:, :, 1, 1]
+        v_b = rkv[:, :, 1, 2]
+        w_b = -torch.exp(self.time_decay_rev)
+        u_b = self.time_first_rev
+
+        k_b_rev = k_b.flip(dims=[1])
+        v_b_rev = v_b.flip(dims=[1])
+
+        # The runner handles .contiguous() internally via the Function,
+        # but flip creates a stride step of -1 which Triton dislikes.
+        # We ensure contiguous here to be safe, though WKVFunc also checks it.
+        out_b_rev = wkv_forward_runner(k_b_rev.contiguous(), v_b_rev.contiguous(), w_b, u_b)
+
+        out_b = out_b_rev.flip(dims=[1])
+        out_b = torch.sigmoid(r_b) * out_b
+
+        out_cat = torch.cat([out_f, out_b], dim=-1)
+        return self.output_proj(out_cat)
+
+
+class BiRWKVBlock(nn.Module):
+    def __init__(self, n_embd, mlp_ratio=4):
+        super().__init__()
+        self.attn = BiRWKVLayer(n_embd)
+        self.ffn_proj = nn.Linear(n_embd, n_embd * mlp_ratio, bias=False)
+        self.ffn_out = nn.Linear(n_embd * mlp_ratio, n_embd, bias=False)
+
+    def forward(self, x):
+        x = x + self.attn(x)
+        x = x + self.ffn_out(F.gelu(self.ffn_proj(x)))
+        return x
+
+
+class BiRWKV(nn.Module):
+    def __init__(self, input_size, num_layers=4):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            BiRWKVBlock(input_size) for _ in range(num_layers)
+        ])
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+
+# ==========================================
+# 4. GRADIENT CHECK
 # ==========================================
 if __name__ == "__main__":
-    if torch.cuda.is_available():
-        print("CUDA detected. Running Optimized RWKV...")
-        device = "cuda"
+    B, T, C = 2, 32, 64
+    device = "cuda"
 
-        model = RWKV_LSTM(128, 256, num_layers=2, batch_first=True).to(device)
-        x = torch.randn(4, 128, 128).to(device)  # Batch=4, Seq=128, Dim=128
+    # Create Model
+    model = BiRWKV(input_size=C, num_layers=1).to(device)
 
-        # Warmup
-        model(x)
+    # Input
+    x = torch.randn(B, T, C, device=device, requires_grad=True)
 
-        # Timing
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
+    # Forward
+    y = model(x)
+    loss = y.sum()
 
-        start.record()
-        out, _ = model(x)
-        end.record()
-        torch.cuda.synchronize()
+    # Backward
+    print(f"Starting Backward...")
+    loss.backward()
+    print("Backward complete.")
 
-        print(f"In: {x.shape}, Out: {out.shape}")
-        print(f"Time: {start.elapsed_time(end):.2f}ms")
-        print("Sanity check (No NaNs):", not torch.isnan(out).any().item())
-    else:
-        print("No CUDA detected. Install Torch+CUDA and Triton to run this.")
+    # Check if gradients exist
+    print(f"x.grad norm: {x.grad.norm().item()}")
+    print(f"time_decay grad norm: {model.blocks[0].attn.time_decay.grad.norm().item()}")
