@@ -1,12 +1,15 @@
 from dataclasses import replace
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops.layers.torch import Rearrange
+from rwkv.model import RWKV
 
 from model.base_model import BaseModel
-from modules.functional import STFTAndInverse, Residual, ReshapeBCFT, Bandsplit, Repeat, \
-    Mask, ToMagnitudeAndInverse
+from model.magsep.rwkv import RWKV_LSTM
+from modules.functional import STFTAndInverse, Residual, ReshapeBCFT, Repeat, \
+    Mask, ToMagnitudeAndInverse, Concat, DebugShape, Bandsplit, SideEffect, CopyDim, SplitNTensor, WithShape
 from modules.self_attention import SelfAttention
 from modules.seq import Seq
 from modules.unet import UNet
@@ -49,39 +52,89 @@ class MagSplitModel(BaseModel):
                     use_rope=True
                 ),
             ),
-            Residual(
-                nn.RMSNorm(dim),
-                SwiGLU(dim),
-                nn.Dropout(dropout),
-            ),
+            # Residual(
+            #     nn.RMSNorm(dim),
+            #     SwiGLU(dim),
+            #     nn.Dropout(dropout),
+            # ),
         )
 
         self.unet = lambda shape: UNet(
             input_shape=shape,
-            channels=[shape.c, 128, 256],
-            stride=(8, 1),
+            channels=[shape.c, 64, 128, 256],
+            stride=(2, 1),
             output_channels=shape.c,
             dropout_rate=dropout,
-            post_downsample_fn=lambda shape: Seq(
-                ReshapeBCFT(
-                    "(b t) f c",
-                    self.transformer(shape.c),
-                ),
-                ReshapeBCFT(
-                    "(b f) t c",
-                    self.transformer(shape.c),
-                ),
+            pre_downsample_fn=lambda shape: Seq(
+                # ReshapeBCFT(
+                #     "(b t) f c",
+                #     self.transformer(shape.c),
+                # ),
+                # ReshapeBCFT(
+                #     "(b f) t c",
+                #     self.transformer(shape.c),
+                # ),
             ),
-            bottleneck_fn=lambda shape: Repeat(
-                layers,
-                ReshapeBCFT(
-                    "(b t) f c",
-                    self.transformer(shape.c),
+            post_downsample_fn=lambda shape: Seq(
+                # ReshapeBCFT(
+                #     "(b t) f c",
+                #     self.transformer(shape.c),
+                # ),
+                # ReshapeBCFT(
+                #     "(b f) t c",
+                #     self.transformer(shape.c),
+                # ),
+            ),
+            bottleneck_fn=lambda shape: Seq(
+                # ReshapeBCFT(
+                #     "(b t) f c",
+                #     self.transformer(shape.c),
+                # ),
+                # ReshapeBCFT(
+                #     "(b f) t c",
+                #     self.transformer(shape.c),
+                # ),
+            ),
+            post_upsample_fn=lambda shape: Seq(
+            )
+        )
+
+        self.lstm = lambda dim: Seq(
+            Residual(
+                # nn.RMSNorm(dim),
+                RWKV_LSTM(
+                    input_size=dim,
+                    hidden_size=128,
+                    num_layers=1,
+                    batch_first=True,
+                    bidirectional=False,
                 ),
-                ReshapeBCFT(
-                    "(b f) t c",
-                    self.transformer(shape.c),
-                ),
+                nn.Linear(128, dim),
+            ),
+            # Residual(
+            #     nn.RMSNorm(dim),
+            #     nn.Dropout(dropout),
+            #     SwiGLU(dim),
+            #     nn.Dropout(dropout),
+            # ),
+        )
+
+        self.thing = lambda shape: Seq(
+            ReshapeBCFT(
+                "(b c) t f",
+                self.lstm(shape.f),
+            ),
+            ReshapeBCFT(
+                "(b t) c f",
+                self.lstm(shape.f),
+            ),
+            ReshapeBCFT(
+                "(b f) t c",
+                self.lstm(shape.c),
+            ),
+            ReshapeBCFT(
+                "(b t) f c",
+                self.lstm(shape.c),
             ),
         )
 
@@ -93,19 +146,41 @@ class MagSplitModel(BaseModel):
                 fn=lambda shape: ToMagnitudeAndInverse(
                     shape=shape,
                     fn=lambda shape: Mask(
-                        Rearrange("b c f t -> b 1 (f c) t"),
-                        Bandsplit(
-                            shape=replace(shape, c=1, f=shape.f * shape.c),
-                            num_splits=splits,
-                            fn=lambda shape: Seq(
-                                self.unet(shape),
-                            )
+                        Seq(
+                            # CopyDim(times=num_instruments, dim=1),
+                            Rearrange("b (n c) f t -> b n (f c) t", n=num_instruments),
+                            # WithShape(
+                            #     shape=replace(shape, c=num_instruments, f=shape.f * shape.c),
+                            #     fn=lambda shape: Seq(
+                            #         SplitNTensor(
+                            #             shape=shape,
+                            #             dim=2,
+                            #             fns=[
+                            #                 lambda shape, index: self.thing(shape),
+                            #                 lambda shape, index: self.thing(shape),
+                            #                 lambda shape, index: self.thing(shape),
+                            #                 lambda shape, index: self.thing(shape),
+                            #             ],
+                            #             split_points=[512, 768, 1024],
+                            #             concat_dim=2,
+                            #         ),
+                            #     )
+                            # ),
+
+                            Bandsplit(
+                                shape=replace(shape, c=num_instruments, f=shape.f * shape.c),
+                                num_splits=splits,
+                                fn=lambda shape: Seq(
+                                    self.thing(shape),
+                                )
+                            ),
+                            Rearrange("b n (c f) t -> b (n c) f t", f=shape.f, n=num_instruments),
                         ),
-                        Rearrange("b 1 (f c) t -> b c f t", c=shape.c),
+                        self.visualize("mask")
                     ),
                 ),
             ),
-            Rearrange("b (n c) t -> b n c t", n=num_instruments)
+            Rearrange("b (n c) t -> b n c t", n=num_instruments),
         )
 
     def process(self, x):
