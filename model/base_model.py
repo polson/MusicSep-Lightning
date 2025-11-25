@@ -25,7 +25,7 @@ class BaseModel(nn.Module, ABC):
             ),
         )
 
-        self.loss_factory = LossFactory.create(LossType.STFT_RMSE)
+        self.loss_factory = LossFactory.create(LossType.MULTI_STFT)
 
     @abstractmethod
     def process(self, x):

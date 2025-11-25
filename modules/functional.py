@@ -56,7 +56,8 @@ class Residual(nn.Module):
         self.fn = Seq(*args)
 
     def forward(self, x):
-        return self.fn(x) + x
+        x = x + self.fn(x)
+        return x
 
 
 class Mask(nn.Module):
@@ -68,11 +69,7 @@ class Mask(nn.Module):
         return f"Mask(fn={self.fn})"
 
     def forward(self, x):
-        mixture = x
-        x = self.fn(x)
-        num_multiplies = x.shape[1] // mixture.shape[1]
-        mixture = mixture.repeat(1, num_multiplies, 1, 1)
-        x = x * mixture
+        x = x * self.fn(x)
         return x
 
 
@@ -396,6 +393,38 @@ class SoftmaxMask(nn.Module):
         return x
 
 
+class TanhMask(nn.Module):
+    def __init__(self, num_instruments, *args):
+        super().__init__()
+        # Tanh outputs values between -1 and 1
+        self.activation = nn.Tanh()
+        self.num_instruments = num_instruments
+        self.fn = Seq(*args)
+
+    def __repr__(self):
+        return f"TanhMask(num_instruments={self.num_instruments}, fn={self.fn})"
+
+    def forward(self, x):
+        mixture = x
+
+        # Forward pass through the sub-network
+        x = self.fn(x)
+
+        # Apply Tanh (-1 to 1)
+        # We do not need SoftmaxGroups here because Tanh is element-wise
+        # and does not require grouping dimensions to normalize.
+        x = self.activation(x)
+
+        # Expand mixture to match the number of output channels
+        # (e.g., if input is stereo and output is 4 instruments * stereo)
+        num_multiplies = x.shape[1] // mixture.shape[1]
+        mixture = mixture.repeat(1, num_multiplies, 1, 1)
+
+        # Apply the mask
+        x = x * mixture
+        return x
+
+
 class Shrink(nn.Module):
     def __init__(self, shape, fn):
         super().__init__()
@@ -539,15 +568,10 @@ class SideEffect(nn.Module):
         return x
 
 
-import torch
-import torch.nn as nn
-from einops import rearrange
-
-
 class ComplexMask(nn.Module):
     def __init__(self, *args):
         super().__init__()
-        self.fn = nn.Sequential(*args)  # Assuming Seq is nn.Sequential
+        self.fn = Seq(*args)
 
     def forward(self, x):
         b, c, f, t = x.shape
@@ -755,6 +779,8 @@ class SplitNTensor(nn.Module):
         final_split_shape = self._create_split_shape(shape, final_size, dim)
         self.fns.append(fns[-1](final_split_shape, len(self.split_points)))
 
+        self.streams = [torch.cuda.Stream() for _ in range(len(self.fns) - 1)]
+
     def _create_split_shape(self, original_shape: CFTShape, size: int, dim: int) -> CFTShape:
         """Create a new CFTShape for a split with the given size along the specified dimension."""
         if dim == 1:  # channels
@@ -769,25 +795,53 @@ class SplitNTensor(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dim_size = x.size(self.dim)
 
-        # Runtime validation (kept for safety)
-        for i, point in enumerate(self.split_points):
-            if point <= 0 or point >= dim_size:
-                raise ValueError(f"Split point {point} is out of bounds for dimension size {dim_size}")
-            if i > 0 and point <= self.split_points[i - 1]:
-                raise ValueError(f"Split points must be in ascending order, got {self.split_points}")
-
+        # Create views (fast, zero-copy)
         splits = []
         start = 0
-
         for split_point in self.split_points:
-            size = split_point - start
-            splits.append(x.narrow(self.dim, start, size))
+            splits.append(x.narrow(self.dim, start, split_point - start))
             start = split_point
+        splits.append(x.narrow(self.dim, start, dim_size - start))
 
-        final_size = dim_size - start
-        splits.append(x.narrow(self.dim, start, final_size))
+        # Prepare outputs list
+        outputs = [torch.empty(0)] * len(splits)
 
-        outputs = [self.fns[i](split) for i, split in enumerate(splits)]
+        # Get current (default) stream
+        default_stream = torch.cuda.current_stream()
+
+        # 2. SYNC: Record event that input 'x' is ready
+        # Side streams must wait for this event before reading 'x'
+        input_ready_event = torch.cuda.Event()
+        input_ready_event.record(default_stream)
+
+        # --- Parallel Execution ---
+
+        # Branch 0: Run on Default Stream (No overhead)
+        outputs[0] = self.fns[0](splits[0])
+
+        # Branches 1..N: Run on Side Streams
+        side_stream_events = []
+
+        for i, stream in enumerate(self.streams):
+            split_idx = i + 1
+            with torch.cuda.stream(stream):
+                # A. Wait for input data to be ready (Prevents NaNs)
+                stream.wait_event(input_ready_event)
+
+                # B. Compute
+                outputs[split_idx] = self.fns[split_idx](splits[split_idx])
+
+                # C. Record completion (Non-blocking)
+                event = torch.cuda.Event()
+                event.record(stream)
+                side_stream_events.append(event)
+
+        # 3. SYNC: Default stream waits for all side streams
+        # Prevents torch.cat from reading empty/garbage memory (NaNs)
+        for event in side_stream_events:
+            default_stream.wait_event(event)
+
+        # 4. Concatenate (Safe now)
         return torch.cat(outputs, dim=self.concat_dim)
 
     def __repr__(self) -> str:
