@@ -12,13 +12,15 @@ class Separator:
             target_sources,
             batch_size=4,
             overlap_percent=0.5,
-            chunk_size_seconds=10
+            chunk_size_seconds=10,
+            steps=10  # <--- Added: Number of inference steps
     ):
         super().__init__()
         self.target_sources = target_sources
         self.batch_size = batch_size
         self.chunk_size = chunk_size_seconds * 44100
         self.overlap_size = round(self.chunk_size * overlap_percent)
+        self.steps = steps  # <--- Store steps
 
     def process_file(
             self,
@@ -31,10 +33,16 @@ class Separator:
 
         ext = Path(mixture_path).suffix.lower()
         processed_chunks = []
+
+        # Switch model to eval mode for inference
+        model.eval()
+
         for chunk in chunks:
             chunk = chunk.to(model.device)
             with torch.no_grad():
-                output = model(chunk)
+                # <--- Changed: Call iterative_inference instead of model()
+                # We assume 'model' has this method (AudioSourceSeparation does)
+                output = model.iterative_inference(chunk, steps=self.steps)
             processed_chunks.append(output)
 
         recombined = self._overlap_add_chunks(
@@ -71,6 +79,10 @@ class Separator:
 
         n, c, t = chunked.shape
         num_tensors = round(n / self.batch_size)
+
+        # Handle case where num_tensors is 0 or very small
+        if num_tensors == 0:
+            num_tensors = 1
 
         tensors = torch.chunk(chunked, num_tensors, dim=0)
         return tensors

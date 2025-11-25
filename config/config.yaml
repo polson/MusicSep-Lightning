@@ -3,16 +3,16 @@ mode: train
 
 # Training settings
 training:
-  batch_size: 8
-  duration: 8
-  num_steps: 10000
+  batch_size: 48
+  duration: 1
+  num_steps: 1000
   max_epochs: 1000
   optimizer: prodigy
   learning_rate: 1
-  seed: 190
+  seed: 191
   grad_accum: 1
   grad_clip: 1.0
-  augment: false
+  augment: true
   target_sources:
     - vocals
   precision: bf16-mixed
@@ -23,10 +23,10 @@ training:
 #  type: "BSRoformer"
 #  n_fft: 2048
 #  hop_length: 512
-#  layers: 3
+#  layers: 1
 #  mask_layers: 1
 #  dropout: 0.1
-#  embed_dim: 192
+#  embed_dim: 64
 #  freqs_per_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 128 ]
 
 model:
@@ -40,29 +40,30 @@ model:
 # Paths for different modes
 paths:
   # Where to save checkpoint files
-  checkpoints: "/home/user/AudioSep/checkpoints"
+  checkpoints: "/home/phil/AudioSep/checkpoints"
 
   # Dataset location
-  dataset: "/home/user/AudioSep/datasets/musdb18hq"
+  dataset: "/media/phil/E65864AD58647DE5/AudioSep/combined"
 
   # Optional: Where to save validation outputs for listening
-  validation: "/home/user/AudioSep/validation"
+  validation: "/home/phil/AudioSep/validation"
 
-  # Optional: Resume training from a checkpoint
-  #resume_from: "/home/user/AudioSep/checkpoints/last-v263.ckpt"
+  # Optional: Resume training or inference from a checkpoint
+  #  resume_from: "/home/phil/AudioSep/checkpoints/last-v297.ckpt"
 
   # Optional: Inference mode input folder, this must be used with resume_from option
-  #inference_input: "/home/user/AudioSep/datasets/musdb18hq_flac/test"
+  # inference_input: "/home/user/AudioSep/datasets/musdb18hq_flac/test"
 
 # Logging and debugging
 logging:
   wandb:
-    enabled: false
+    enabled: true
     save_code: true # Uploads all code in the model directory to wandb
-  validate_every: 1 # Validation loss / sdr metric interval (0 to disable)
-  debug_every: 1 # Debug visualization interval (0 to disable)
+  validate_every: 0 # Validation loss / sdr metric interval (0 to disable)
+  debug_every: 0 # Debug visualization interval (0 to disable)
 
 inference:
   batch_size: 4
-  duration: 11
+  duration: 8
+  steps: 10
 

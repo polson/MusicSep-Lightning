@@ -121,17 +121,7 @@ class UNet(nn.Module):
         self.final_conv = nn.Conv2d(self.channels[0], self.output_channels, kernel_size=1)
 
     def __repr__(self):
-        return (f"UNet(input_shape={self.input_shape}, channels={self.channels}, "
-                f"stride={self.stride}, output_channels={self.output_channels}, "
-                f"bottleneck_fn={self.bottleneck_fn}, skip_fn={self.skip_fn}, "
-                f"pre_downsample_fn={self.pre_downsample_fn}, "
-                f"post_downsample_fn={self.post_downsample_fn}, "
-                f"post_upsample_fn={self.post_upsample_fn}, "
-                f"post_skip_fn={self.post_skip_fn}, "
-                f"dropout_rate={self.dropout_rate}, "
-                f"dropout_after_downsample={self.dropout_after_downsample}, "
-                f"dropout_after_upsample={self.dropout_after_upsample}, "
-                f"dropout_in_bottleneck={self.dropout_in_bottleneck})")
+        return f"UNet(input_shape={self.input_shape}, channels={self.channels}"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, f, t = x.shape

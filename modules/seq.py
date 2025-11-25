@@ -14,10 +14,10 @@ class Seq(nn.Module):
             new_modules.append(module)
         self.modules_list = new_modules
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         for i, module in enumerate(self.modules_list):
             try:
-                x = self.run_module(x, module)
+                x = self.run_module(x, module, **kwargs)
             except Exception as e:
                 if not isinstance(e, SeqException):
                     seq_e = SeqException(str(e))
@@ -28,14 +28,22 @@ class Seq(nn.Module):
                     raise
         return x
 
-    def run_module(self, x, module):
+    def run_module(self, x, module, **kwargs):
         if isinstance(x, tuple):
             try:
-                x = module(*x)
+                x = module(*x, **kwargs)
             except TypeError:
-                x = module(x[0])
+                # Module doesn't accept kwargs, try without
+                try:
+                    x = module(*x)
+                except TypeError:
+                    x = module(x[0])
         else:
-            x = module(x)
+            try:
+                x = module(x, **kwargs)
+            except TypeError:
+                # Module doesn't accept kwargs, call without them
+                x = module(x)
         return x
 
 

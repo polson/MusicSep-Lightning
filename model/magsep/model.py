@@ -3,34 +3,73 @@ from dataclasses import replace
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 from einops.layers.torch import Rearrange
-from rwkv.model import RWKV
 
 from model.base_model import BaseModel
-from model.magsep.rwkv import RWKV_LSTM
-from modules.functional import STFTAndInverse, Residual, ReshapeBCFT, Repeat, \
-    Mask, ToMagnitudeAndInverse, Concat, DebugShape, Bandsplit, SideEffect, CopyDim, SplitNTensor, WithShape
-from modules.self_attention import SelfAttention
+from model.magsep.rwkv import BiRWKV
+from modules.functional import STFTAndInverse, ReshapeBCFT, Repeat, \
+    Mask, ToMagnitudeAndInverse, DebugShape, Bandsplit, SplitNTensor, FFT2dAndInverse, Concat, FFT2d, ComplexMask
 from modules.seq import Seq
-from modules.unet import UNet
 
 
-class SwiGLU(nn.Module):
-    def __init__(self, dim, hidden_dim=None, bias=False):
+class SinusoidalPosEmb(nn.Module):
+    """Sinusoidal positional embeddings for continuous time."""
+
+    def __init__(self, dim, max_period=10000):
         super().__init__()
-        if hidden_dim is None:
-            hidden_dim = int(2 * dim * 4 / 3)
-        self.gate_proj = nn.Linear(dim, 2 * hidden_dim, bias=bias)
-        self.down_proj = nn.Linear(hidden_dim, dim, bias=bias)
+        self.dim = dim
+        self.max_period = max_period
 
-    def forward(self, x):
-        gate_value = self.gate_proj(x)
-        gate, value = gate_value.chunk(2, dim=-1)
-        hidden = F.silu(gate) * value
-        return self.down_proj(hidden)
+    def forward(self, t):
+        # t: (batch,) values in [0, 1]
+        half = self.dim // 2
+        freqs = torch.exp(
+            -math.log(self.max_period) * torch.arange(half, device=t.device) / half
+        )
+        args = t[:, None] * freqs[None, :]
+        return torch.cat([args.cos(), args.sin()], dim=-1)
 
 
-# @torch.compile()
+class TimeConditionedLayer(nn.Module):
+    """FiLM conditioning for flow matching with sinusoidal time embeddings."""
+
+    def __init__(self, dim, time_embed_dim=256):
+        super().__init__()
+        self.time_mlp = nn.Sequential(
+            SinusoidalPosEmb(time_embed_dim),
+            nn.Linear(time_embed_dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim * 2),
+        )
+
+        # Initialize final layer for identity transform at t=0
+        nn.init.zeros_(self.time_mlp[-1].weight)
+        nn.init.zeros_(self.time_mlp[-1].bias)
+
+    def forward(self, x, t=None, **kwargs):
+        if t is None:
+            return x
+
+        # Ensure t is (batch,) shape
+        if t.dim() == 0:
+            t = t.unsqueeze(0).expand(x.shape[0])
+        elif t.dim() == 2:
+            t = t.squeeze(-1)
+
+        params = self.time_mlp(t.float())
+        scale, shift = params.chunk(2, dim=-1)
+
+        # Reshape for (b, c, f, t) or (b, c, t, f) tensors
+        while scale.dim() < x.dim():
+            scale = scale.unsqueeze(-1)
+            shift = shift.unsqueeze(-1)
+
+        return x * (1 + scale) + shift
+
+
 class MagSplitModel(BaseModel):
     def __init__(self,
                  num_instruments=1,
@@ -42,146 +81,121 @@ class MagSplitModel(BaseModel):
         super().__init__()
         dropout = 0.1
 
-        self.transformer = lambda dim: Seq(
-            Residual(
-                nn.RMSNorm(dim),
-                SelfAttention(
-                    embed_dim=dim,
-                    num_heads=8,
-                    dropout=dropout,
-                    use_rope=True
-                ),
-            ),
-            # Residual(
-            #     nn.RMSNorm(dim),
-            #     SwiGLU(dim),
-            #     nn.Dropout(dropout),
-            # ),
-        )
-
-        self.unet = lambda shape: UNet(
-            input_shape=shape,
-            channels=[shape.c, 64, 128, 256],
-            stride=(2, 1),
-            output_channels=shape.c,
-            dropout_rate=dropout,
-            pre_downsample_fn=lambda shape: Seq(
-                # ReshapeBCFT(
-                #     "(b t) f c",
-                #     self.transformer(shape.c),
-                # ),
-                # ReshapeBCFT(
-                #     "(b f) t c",
-                #     self.transformer(shape.c),
-                # ),
-            ),
-            post_downsample_fn=lambda shape: Seq(
-                # ReshapeBCFT(
-                #     "(b t) f c",
-                #     self.transformer(shape.c),
-                # ),
-                # ReshapeBCFT(
-                #     "(b f) t c",
-                #     self.transformer(shape.c),
-                # ),
-            ),
-            bottleneck_fn=lambda shape: Seq(
-                # ReshapeBCFT(
-                #     "(b t) f c",
-                #     self.transformer(shape.c),
-                # ),
-                # ReshapeBCFT(
-                #     "(b f) t c",
-                #     self.transformer(shape.c),
-                # ),
-            ),
-            post_upsample_fn=lambda shape: Seq(
-            )
-        )
-
-        self.lstm = lambda dim: Seq(
-            Residual(
-                # nn.RMSNorm(dim),
-                RWKV_LSTM(
-                    input_size=dim,
-                    hidden_size=128,
-                    num_layers=1,
-                    batch_first=True,
-                    bidirectional=False,
-                ),
-                nn.Linear(128, dim),
-            ),
-            # Residual(
-            #     nn.RMSNorm(dim),
-            #     nn.Dropout(dropout),
-            #     SwiGLU(dim),
-            #     nn.Dropout(dropout),
-            # ),
-        )
-
-        self.thing = lambda shape: Seq(
-            ReshapeBCFT(
-                "(b c) t f",
-                self.lstm(shape.f),
-            ),
-            ReshapeBCFT(
-                "(b t) c f",
-                self.lstm(shape.f),
-            ),
-            ReshapeBCFT(
-                "(b f) t c",
-                self.lstm(shape.c),
-            ),
-            ReshapeBCFT(
-                "(b t) f c",
-                self.lstm(shape.c),
-            ),
-        )
+        self.num_instruments = num_instruments
+        embed_dim_1 = 768
+        embed_dim_2 = 256
+        embed_dim = embed_dim_1 + embed_dim_2
 
         self.model = Seq(
             STFTAndInverse(
                 in_channels=2,
                 n_fft=n_fft,
                 hop_length=hop_length,
-                fn=lambda shape: ToMagnitudeAndInverse(
-                    shape=shape,
-                    fn=lambda shape: Mask(
-                        Seq(
-                            # CopyDim(times=num_instruments, dim=1),
-                            Rearrange("b (n c) f t -> b n (f c) t", n=num_instruments),
-                            # WithShape(
-                            #     shape=replace(shape, c=num_instruments, f=shape.f * shape.c),
-                            #     fn=lambda shape: Seq(
-                            #         SplitNTensor(
-                            #             shape=shape,
-                            #             dim=2,
-                            #             fns=[
-                            #                 lambda shape, index: self.thing(shape),
-                            #                 lambda shape, index: self.thing(shape),
-                            #                 lambda shape, index: self.thing(shape),
-                            #                 lambda shape, index: self.thing(shape),
-                            #             ],
-                            #             split_points=[512, 768, 1024],
-                            #             concat_dim=2,
-                            #         ),
-                            #     )
-                            # ),
+                fn=lambda shape: Seq(
+                    ComplexMask(
+                        Rearrange("b c f t -> b 1 (f c) t"),
 
-                            Bandsplit(
-                                shape=replace(shape, c=num_instruments, f=shape.f * shape.c),
-                                num_splits=splits,
-                                fn=lambda shape: Seq(
-                                    self.thing(shape),
-                                )
-                            ),
-                            Rearrange("b n (c f) t -> b (n c) f t", f=shape.f, n=num_instruments),
+                        # EMBED
+                        SplitNTensor(
+                            shape=replace(shape, c=1, f=shape.f * shape.c),
+                            split_points=[512],
+                            fns=[
+                                lambda shape, index: Seq(
+                                    Rearrange("b c f t -> b c t f"),
+                                    nn.Linear(shape.f, embed_dim_1),
+                                    nn.RMSNorm(embed_dim_1),
+                                    Rearrange("b c t f -> b c f t"),
+                                ),
+                                lambda shape, index: Seq(
+                                    Rearrange("b c f t -> b c t f"),
+                                    nn.Linear(shape.f, embed_dim_2),
+                                    nn.RMSNorm(embed_dim_2),
+                                    Rearrange("b c t f -> b c f t"),
+                                ),
+                            ],
+                            dim=2,
+                            concat_dim=2,
                         ),
-                        self.visualize("mask")
+
+                        # Inject time conditioning after embedding
+                        TimeConditionedLayer(embed_dim),
+
+                        SplitNTensor(
+                            shape=replace(shape, c=1, f=embed_dim),
+                            split_points=[embed_dim_1],
+                            fns=[
+                                lambda shape, index: Repeat(
+                                    layers,
+                                    ReshapeBCFT(
+                                        "(b c) t f",
+                                        TimeConditionedLayer(shape.f),
+                                        BiRWKV(shape.f, num_layers=1),
+                                    ),
+
+                                    # ReshapeBCFT(
+                                    #     "(b c) f t",
+                                    #     BiRWKV(690, num_layers=1),
+                                    # ),
+                                    FFT2dAndInverse(
+                                        shape=shape,
+                                        fn=lambda shape: Seq(
+                                            ReshapeBCFT(
+                                                "(b c) t f",
+                                                TimeConditionedLayer(shape.f),
+                                                BiRWKV(shape.f, num_layers=1),
+                                            ),
+
+                                            # ReshapeBCFT(
+                                            #     "(b c) f t",
+                                            #     BiRWKV(346, num_layers=1),
+                                            # ),
+                                        )
+                                    ),
+                                ),
+                                lambda shape, index: Seq(
+                                    ReshapeBCFT(
+                                        "(b c) t f",
+                                        TimeConditionedLayer(shape.f),
+                                        BiRWKV(shape.f, num_layers=1),
+                                    ),
+                                ),
+                            ],
+                            dim=2,
+                            concat_dim=2,
+                        ),
+
+                        Rearrange("b c f t -> b c t f"),
+                        nn.RMSNorm(embed_dim),
+                        nn.Linear(embed_dim, embed_dim * 4),
+                        nn.Tanh(),
+                        nn.Linear(embed_dim * 4, shape.f * shape.c * 2),
+                        nn.GLU(dim=-1),
+                        Rearrange("b c t f -> b c f t"),
+
+                        Rearrange("b 1 (f c) t -> b c f t", c=shape.c),
+
+                        self.visualize("mask"),
                     ),
                 ),
             ),
-            Rearrange("b (n c) t -> b n c t", n=num_instruments),
+            # Rearrange("b (n c) t -> b n c t", n=num_instruments)
         )
 
-    def process(self, x):
-        return self.model(x)
+    def process(self, x, t=None):
+        # x: (b, n, c, samples) for blended input, (b, c, samples) for mixture
+        # print(
+        #     f"t first value: {t[0] if t is not None else 'None'}, is debug: {self.is_debug} is training: {self.training}"
+        # )
+        if x.dim() == 4:
+            b, n, c, samples = x.shape
+            x = rearrange(x, 'b n c t -> (b n) c t')
+            t = t.repeat_interleave(n) if t is not None else None
+        else:
+            b = x.shape[0]
+            n = self.num_instruments
+
+        # Pass t as kwarg - Seq will propagate it through
+        x = self.model(x, t=t)
+
+        x = rearrange(x, '(b n) c t -> b n c t', b=b, n=n)
+        return x
