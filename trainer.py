@@ -83,20 +83,30 @@ class AudioSourceSeparation(L.LightningModule):
         self.debug_targets = val_targets
 
     def training_step(self, batch, batch_idx):
-        # Mixture is b,c,t
-        # Targets is b,n,c,t
         mixture, targets = batch
         b = mixture.shape[0]
         t = torch.rand(b, 1, 1).to(mixture.device)
-        noise = torch.randn_like(mixture)
+        noise = torch.randn_like(targets)  # noise should match targets shape
 
-        targets = rearrange(targets, "b n c t -> (b n) c t")
-        noisy = (1 - t) * noise + t * targets
+        # Don't flatten targets before interpolation
+        noisy = (1 - t.unsqueeze(1)) * noise + t.unsqueeze(1) * targets  # b,n,c,t
         target_velocity = targets - noise
 
-        # Model predicts the velocity field and loss
-        predicted_velocity, loss = self.model(noisy, targets=target_velocity, t=t)
-        # predicted velocity is b n c t
+        # Flatten for model input
+        noisy_flat = rearrange(noisy, "b n c t -> (b n) c t")
+        target_velocity_flat = rearrange(target_velocity, "b n c t -> (b n) c t")
+
+        # Repeat mixture for each instrument
+        mixture_expanded = mixture.unsqueeze(1).expand(-1, self.num_instruments, -1, -1)
+        mixture_flat = rearrange(mixture_expanded, "b n c t -> (b n) c t")
+
+        # Pass mixture as conditioning
+        predicted_velocity, loss = self.model(
+            noisy_flat,
+            mixture=mixture_flat,
+            targets=target_velocity_flat,
+            t=t
+        )
 
         validation_output = self.validation_loss_step()
         self._debug_step()
@@ -104,7 +114,6 @@ class AudioSourceSeparation(L.LightningModule):
         self.log("train/t_mean", t.mean(), prog_bar=True)
         self.log("train/loss", loss, prog_bar=True)
 
-        target_velocity = rearrange(target_velocity, "(b n) c t -> b n c t", n=self.num_instruments)
         mixture_expanded = rearrange(mixture, "b c t -> b 1 c t")
 
         return {
@@ -214,26 +223,24 @@ class AudioSourceSeparation(L.LightningModule):
         return self.iterative_inference(x)
 
     @torch.no_grad()
-    def iterative_inference(
-            self,
-            mixture: torch.Tensor,
-            steps: int = None,
-    ) -> torch.Tensor:
+    def iterative_inference(self, mixture: torch.Tensor, steps: int = None) -> torch.Tensor:
         if steps is None:
             steps = self.inference_steps
 
         b, c, t = mixture.shape
-        # Initialize noise for each instrument: [batch, num_instruments, channels, time]
         x = torch.randn(b, self.num_instruments, c, t, device=mixture.device)
+
+        # Expand mixture for each instrument
+        mixture_expanded = mixture.unsqueeze(1).expand(-1, self.num_instruments, -1, -1)
+        mixture_flat = rearrange(mixture_expanded, "b n c t -> (b n) c t")
 
         dt = 1.0 / steps
 
         for step in range(steps):
             t_val = torch.full((b, 1, 1), step * dt, device=mixture.device)
-            # Flatten for model: [batch * num_instruments, channels, time]
             x_flat = rearrange(x, "b n c t -> (b n) c t")
-            predicted_velocity, _ = self.model(x_flat, t=t_val)
-            # predicted_velocity should be [batch, num_instruments, channels, time]
+
+            predicted_velocity, _ = self.model(x_flat, mixture=mixture_flat, t=t_val)
             x = x + predicted_velocity * dt
 
         return x

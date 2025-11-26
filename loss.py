@@ -32,6 +32,7 @@ class MSELoss(LossInterface, nn.Module):
         super().__init__()
 
     def calculate(self, prediction, target):
+        prediction = rearrange(prediction, "b n c t -> (b n) c t")
         return F.mse_loss(prediction, target)
 
 

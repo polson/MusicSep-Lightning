@@ -29,19 +29,16 @@ class BaseModel(nn.Module, ABC):
         self.loss_factory = LossFactory.create(LossType.MULTI_STFT)
 
     @abstractmethod
-    def process(self, x, t=None):
+    def process(self, x, mixture=None, t=None):
         pass
 
     def loss(self, x, targets, mixture):
         return self.loss_factory.calculate(x, targets)
 
-    def forward(self, x, targets=None, t=None):
-        pred = self.process(x, t=t)
-
-        # Calculate loss between prediction and clean target
+    def forward(self, x, mixture=None, targets=None, t=None):
+        pred = self.process(x, mixture=mixture, t=t)
         loss = None
         if targets is not None:
-            # Note: we don't need mixture here anymore for 'Predict Source' formulation
             loss = self.loss_factory.calculate(pred, targets)
 
         return pred, loss
