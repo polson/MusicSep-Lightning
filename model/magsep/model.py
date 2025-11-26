@@ -1,3 +1,4 @@
+import math
 from dataclasses import replace
 
 import torch
@@ -6,10 +7,12 @@ import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
+from loss import LossFactory, LossType
 from model.base_model import BaseModel
 from model.magsep.rwkv import BiRWKV
 from modules.functional import STFTAndInverse, ReshapeBCFT, Repeat, \
-    Mask, ToMagnitudeAndInverse, DebugShape, Bandsplit, SplitNTensor, FFT2dAndInverse, Concat, FFT2d, ComplexMask
+    Mask, ToMagnitudeAndInverse, DebugShape, Bandsplit, SplitNTensor, FFT2dAndInverse, Concat, FFT2d, ComplexMask, \
+    Residual
 from modules.seq import Seq
 
 
@@ -34,8 +37,9 @@ class SinusoidalPosEmb(nn.Module):
 class TimeConditionedLayer(nn.Module):
     """FiLM conditioning for flow matching with sinusoidal time embeddings."""
 
-    def __init__(self, dim, time_embed_dim=256):
+    def __init__(self, dim, time_embed_dim=1024):
         super().__init__()
+        self.dim = dim
         self.time_mlp = nn.Sequential(
             SinusoidalPosEmb(time_embed_dim),
             nn.Linear(time_embed_dim, dim),
@@ -53,19 +57,29 @@ class TimeConditionedLayer(nn.Module):
         if t is None:
             return x
 
-        # Ensure t is (batch,) shape
         if t.dim() == 0:
             t = t.unsqueeze(0).expand(x.shape[0])
         elif t.dim() == 2:
             t = t.squeeze(-1)
 
-        params = self.time_mlp(t.float())
-        scale, shift = params.chunk(2, dim=-1)
+        # Handle batch size mismatch from reshapes like "(b c) t f"
+        # x.shape[0] is the effective batch size after reshape
+        # t.shape[0] is the original batch size
+        if t.shape[0] != x.shape[0]:
+            # Repeat t to match x's batch dimension
+            repeat_factor = x.shape[0] // t.shape[0]
+            t = t.repeat_interleave(repeat_factor)
 
-        # Reshape for (b, c, f, t) or (b, c, t, f) tensors
-        while scale.dim() < x.dim():
-            scale = scale.unsqueeze(-1)
-            shift = shift.unsqueeze(-1)
+        params = self.time_mlp(t.float())  # (b_eff, dim*2)
+        scale, shift = params.chunk(2, dim=-1)  # each (b_eff, dim)
+
+        # Build the broadcast shape: (b, 1, 1, ..., dim)
+        # Feature dim is always last
+        num_middle_dims = x.dim() - 2
+        view_shape = (x.shape[0],) + (1,) * num_middle_dims + (self.dim,)
+
+        scale = scale.view(*view_shape)
+        shift = shift.view(*view_shape)
 
         return x * (1 + scale) + shift
 
@@ -86,14 +100,20 @@ class MagSplitModel(BaseModel):
         embed_dim_2 = 256
         embed_dim = embed_dim_1 + embed_dim_2
 
+        self.loss_factory = LossFactory.create(LossType.MSE)
+
         self.model = Seq(
             STFTAndInverse(
                 in_channels=2,
                 n_fft=n_fft,
                 hop_length=hop_length,
                 fn=lambda shape: Seq(
-                    ComplexMask(
+                    Seq(
                         Rearrange("b c f t -> b 1 (f c) t"),
+
+                        Rearrange("b c f t -> b c t f"),
+                        nn.LayerNorm(shape.f * shape.c),
+                        Rearrange("b c t f -> b c f t"),
 
                         # EMBED
                         SplitNTensor(
@@ -118,7 +138,10 @@ class MagSplitModel(BaseModel):
                         ),
 
                         # Inject time conditioning after embedding
-                        TimeConditionedLayer(embed_dim),
+                        ReshapeBCFT(
+                            "b c t f",
+                            TimeConditionedLayer(embed_dim),
+                        ),
 
                         SplitNTensor(
                             shape=replace(shape, c=1, f=embed_dim),
@@ -165,11 +188,11 @@ class MagSplitModel(BaseModel):
                         ),
 
                         Rearrange("b c f t -> b c t f"),
+                        TimeConditionedLayer(embed_dim),
                         nn.RMSNorm(embed_dim),
                         nn.Linear(embed_dim, embed_dim * 4),
-                        nn.Tanh(),
-                        nn.Linear(embed_dim * 4, shape.f * shape.c * 2),
-                        nn.GLU(dim=-1),
+                        nn.SiLU(),
+                        nn.Linear(embed_dim * 4, shape.f * shape.c),
                         Rearrange("b c t f -> b c f t"),
 
                         Rearrange("b 1 (f c) t -> b c f t", c=shape.c),

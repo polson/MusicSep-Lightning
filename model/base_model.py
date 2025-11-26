@@ -30,59 +30,21 @@ class BaseModel(nn.Module, ABC):
 
     @abstractmethod
     def process(self, x, t=None):
-        """
-        Process input with optional time conditioning.
-
-        In 'Predict Source' formulation:
-        - Input x is x_t = (1-t)*mixture + t*target (a blended state)
-        - Model predicts the clean target (separated sources)
-        - This prediction is used to calculate velocity during ODE solving
-
-        Args:
-            x: Input tensor
-               - (b, n, c, samples) for blended input during training/iterative inference
-               - (b, c, samples) for mixture during single-pass inference
-            t: Optional time conditioning (b,) in [0, 1]
-               - t=0 means input is pure mixture
-               - t=1 means input is pure target
-
-        Returns:
-            Processed tensor (b, n, c, samples) - predicted clean separated sources
-        """
         pass
 
     def loss(self, x, targets, mixture):
         return self.loss_factory.calculate(x, targets)
 
     def forward(self, x, targets=None, t=None):
-        """
-        Forward pass with 'Predict Source' formulation.
-
-        The model sees x_t (blended input) and predicts the clean target sources.
-        Loss is computed by comparing predicted sources to ground truth targets.
-
-        Args:
-            x: Input tensor
-               - (b, n, c, samples) blended input x_t = (1-t)*mixture + t*target
-               - (b, c, samples) mixture during single-pass inference
-            targets: Optional target sources (b, n, c, samples) for loss computation
-            t: Optional time conditioning (b,) indicating blend ratio
-
-        Returns:
-            Tuple of (predicted_sources, loss)
-            - predicted_sources: (b, n, c, samples) - model's prediction of clean sources
-            - loss: scalar loss if targets provided, None otherwise
-        """
-        # Model predicts clean sources from blended input
-        predicted_sources = self.process(x, t=t)
+        pred = self.process(x, t=t)
 
         # Calculate loss between prediction and clean target
         loss = None
         if targets is not None:
             # Note: we don't need mixture here anymore for 'Predict Source' formulation
-            loss = self.loss_factory.calculate(predicted_sources, targets)
+            loss = self.loss_factory.calculate(pred, targets)
 
-        return predicted_sources, loss
+        return pred, loss
 
     def valid_forward(self, x, targets=None, t=None):
         print("valid forward t mean: ", t.mean().item() if t is not None else 'None')

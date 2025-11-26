@@ -3,8 +3,8 @@ mode: train
 
 # Training settings
 training:
-  batch_size: 48
-  duration: 1
+  batch_size: 8
+  duration: 8
   num_steps: 1000
   max_epochs: 1000
   optimizer: prodigy
@@ -49,7 +49,7 @@ paths:
   validation: "/home/phil/AudioSep/validation"
 
   # Optional: Resume training or inference from a checkpoint
-  #  resume_from: "/home/phil/AudioSep/checkpoints/last-v297.ckpt"
+  #  resume_from: "/home/phil/AudioSep/checkpoints/last-v93.ckpt"
 
   # Optional: Inference mode input folder, this must be used with resume_from option
   # inference_input: "/home/user/AudioSep/datasets/musdb18hq_flac/test"
@@ -65,5 +65,5 @@ logging:
 inference:
   batch_size: 4
   duration: 8
-  steps: 10
+  steps: 20
 

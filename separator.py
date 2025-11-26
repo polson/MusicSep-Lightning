@@ -33,15 +33,11 @@ class Separator:
 
         ext = Path(mixture_path).suffix.lower()
         processed_chunks = []
-
-        # Switch model to eval mode for inference
         model.eval()
 
         for chunk in chunks:
             chunk = chunk.to(model.device)
             with torch.no_grad():
-                # <--- Changed: Call iterative_inference instead of model()
-                # We assume 'model' has this method (AudioSourceSeparation does)
                 output = model.iterative_inference(chunk, steps=self.steps)
             processed_chunks.append(output)
 

@@ -28,10 +28,10 @@ class ReshapeBCFT(nn.Module):
     def __repr__(self):
         return f"ReshapeBCFT(reshape_to='{self.reshape_to}', fn={self.fn})"
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         shape_dict = dict(zip(['b', 'c', 'f', 't'], x.shape))
-        x_intermediate = rearrange(x, f'b c f t -> {self.reshape_to}', **shape_dict)
-        x_processed = self.fn(x_intermediate)
+        x = rearrange(x, f'b c f t -> {self.reshape_to}', **shape_dict)
+        x_processed = self.fn(x, **kwargs)
         output = rearrange(x_processed, f'{self.reshape_to} -> b c f t', **shape_dict)
         return output
 
@@ -42,8 +42,8 @@ class DebugShape(nn.Module):
         self.fn = nn.Identity()
         self.name = name
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fn(x)
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        x = self.fn(x, **kwargs)
         name_prefix = f"{self.name}: " if self.name else ""
         print(
             f"{name_prefix}Shape: {x.shape}, Min: {x.min().item():.4f}, Max: {x.max().item():.4f}, Mean: {x.mean().item():.4f}")
@@ -55,8 +55,8 @@ class Residual(nn.Module):
         super().__init__()
         self.fn = Seq(*args)
 
-    def forward(self, x):
-        x = x + self.fn(x)
+    def forward(self, x, **kwargs):
+        x = x + self.fn(x, **kwargs)
         return x
 
 
@@ -68,8 +68,8 @@ class Mask(nn.Module):
     def __repr__(self):
         return f"Mask(fn={self.fn})"
 
-    def forward(self, x):
-        x = x * self.fn(x)
+    def forward(self, x, **kwargs):
+        x = x * self.fn(x, **kwargs)
         return x
 
 
@@ -82,8 +82,8 @@ class Scale(nn.Module):
     def __repr__(self):
         return f"Scale(scale={self.scale}, fn={self.fn})"
 
-    def forward(self, x):
-        return self.fn(x) * self.scale
+    def forward(self, x, **kwargs):
+        return self.fn(x, **kwargs) * self.scale
 
 
 class Concat(nn.Module):
@@ -95,13 +95,13 @@ class Concat(nn.Module):
     def __repr__(self):
         return f"Concat(fns={self.fns}, dim={self.dim})"
 
-    def forward(self, x):
-        outputs = [fn(x) for fn in self.fns]
+    def forward(self, x, **kwargs):
+        outputs = [fn(x, **kwargs) for fn in self.fns]
         return torch.cat(outputs, dim=self.dim)
 
 
 class Abs(nn.Module):
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         return torch.abs(x)
 
 
@@ -115,9 +115,9 @@ class Film(nn.Module):
     def __repr__(self):
         return f"Film(dim={self.dim}, fn={self.fn})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         residual = x
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
         mask, bias = torch.split(x, x.shape[self.dim] // 2, dim=self.dim)
         x = residual * torch.sigmoid(mask) + bias
         return x
@@ -132,13 +132,13 @@ class SwiGLU(nn.Module):
     def __repr__(self):
         return f"SwiGLU(dim={self.dim})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         gate, value = torch.split(x, x.shape[self.dim] // 2, dim=self.dim)
         return self.silu(gate) * value
 
 
 class SplitSum(nn.Module):
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         c_total = x.shape[1]
         c_half = c_total // 2
         x1 = x[:, :c_half, ...]
@@ -155,11 +155,11 @@ class DropBlock(nn.Module):
     def __repr__(self):
         return f"DropBlock(drop_prob={self.drop_prob}, fn={self.fn})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         """Determines whether to drop the block and runs it if not dropped."""
         if self.training and torch.rand(1).item() < self.drop_prob:
             return x
-        return self.fn(x)
+        return self.fn(x, **kwargs)
 
 
 class Freeze(nn.Module):
@@ -172,8 +172,8 @@ class Freeze(nn.Module):
     def __repr__(self):
         return f"Freeze(fn={self.fn})"
 
-    def forward(self, x):
-        return self.fn(x)
+    def forward(self, x, **kwargs):
+        return self.fn(x, **kwargs)
 
 
 class Repeat(nn.Module):
@@ -185,9 +185,9 @@ class Repeat(nn.Module):
     def __repr__(self):
         return f"Repeat(num_repeats={self.num_repeats}, modules_list={self.modules_list})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         for module in self.modules_list:
-            x = module(x)
+            x = module(x, **kwargs)
         return x
 
 
@@ -203,9 +203,9 @@ class RepeatWithArgs(nn.Module):
     def __repr__(self):
         return f"RepeatWithArgs(num_repeats={self.num_repeats}, block={self.block}, blocks={self.blocks})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         for i in range(self.num_repeats):
-            x = self.blocks[i](x)
+            x = self.blocks[i](x, **kwargs)
         return x
 
 
@@ -221,10 +221,10 @@ class RepeatWithArgsConcat(nn.Module):
     def __repr__(self):
         return f"RepeatWithArgsConcat(num_repeats={self.num_repeats}, block={self.block}, blocks={self.blocks})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         outputs = []
         for i in range(self.num_repeats):
-            output_i = self.blocks[i](x)
+            output_i = self.blocks[i](x, **kwargs)
             outputs.append(output_i)
         concatenated_output = torch.cat(outputs, dim=1)
         return concatenated_output
@@ -239,7 +239,7 @@ class CopyDim(nn.Module):
     def __repr__(self):
         return f"RepeatDim(dim={self.dim}, times={self.times})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         sizes = [1] * x.ndim
         sizes[self.dim] = self.times
         x = x.repeat(*sizes)
@@ -275,7 +275,7 @@ class PadBCFT(nn.Module):
     def __repr__(self):
         return f"PadBCFT(shape={self.shape}, target_time={self.target_time}, fn={self.fn}, mode='{self.mode}', value={self.value})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         b, c, f, t = x.shape
 
         t_pad_right = self.target_time - t
@@ -286,7 +286,7 @@ class PadBCFT(nn.Module):
 
         # Apply function if provided
         if self.fn is not None:
-            x = self.fn(x)
+            x = self.fn(x, **kwargs)
 
         if t_pad_right > 0:
             x = x[:, :, :, :t]
@@ -322,7 +322,7 @@ class PadBCFTNearestMultiple(nn.Module):
                 f"time_multiple={self.time_multiple}, "
                 f"fn={self.fn})")
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         b, c, f, t = x.shape
         f_remainder = f % self.freq_multiple
         f_pad = (self.freq_multiple - f_remainder) % self.freq_multiple
@@ -330,7 +330,7 @@ class PadBCFTNearestMultiple(nn.Module):
         t_pad = (self.time_multiple - t_remainder) % self.time_multiple
         padding = (0, t_pad, 0, f_pad)
         x = nn.functional.pad(x, padding, mode='constant', value=0)
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
         if f_pad > 0 or t_pad > 0:
             x = x[:, :, :f, :t]
         return x
@@ -345,13 +345,13 @@ class PadBCTNearestMultiple(nn.Module):
     def __repr__(self):
         return f"PadBCTNearestMultiple(time_multiple={self.time_multiple}, fn={self.fn})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         b, c, f, t = x.shape
         t_remainder = t % self.time_multiple
         t_pad = (self.time_multiple - t_remainder) % self.time_multiple
         padding = (0, t_pad, 0, 0)
         x = nn.functional.pad(x, padding, mode='constant', value=0)
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
         if t_pad > 0:
             x = x[:, :, :, :t]
         return x
@@ -365,7 +365,7 @@ class SoftmaxGroups(nn.Module):
     def __repr__(self):
         return f"SoftmaxGroups(num_groups={self.num_groups})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x = rearrange(x, 'b (n c) f t -> b n c f t', n=self.num_groups)
         x = torch.softmax(x, dim=1)
         x = rearrange(x, 'b n c f t -> b (n c) f t')
@@ -383,9 +383,9 @@ class SoftmaxMask(nn.Module):
     def __repr__(self):
         return f"SoftmaxMask(num_instruments={self.num_instruments}, fn={self.fn})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         mixture = x
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
         x = self.softmax_groups(x)
         num_multiplies = x.shape[1] // mixture.shape[1]
         mixture = mixture.repeat(1, num_multiplies, 1, 1)
@@ -404,11 +404,11 @@ class TanhMask(nn.Module):
     def __repr__(self):
         return f"TanhMask(num_instruments={self.num_instruments}, fn={self.fn})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         mixture = x
 
         # Forward pass through the sub-network
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
 
         # Apply Tanh (-1 to 1)
         # We do not need SoftmaxGroups here because Tanh is element-wise
@@ -441,8 +441,8 @@ class Shrink(nn.Module):
     def __repr__(self):
         return f"Shrink(shape={self.shape}, fn={self.fn}, thing={self.thing})"
 
-    def forward(self, x):
-        return self.thing(x)
+    def forward(self, x, **kwargs):
+        return self.thing(x, **kwargs)
 
 
 class Bandsplit(nn.Module):
@@ -459,7 +459,7 @@ class Bandsplit(nn.Module):
     def __repr__(self):
         return f"Bandsplit(shape={self.shape}, num_splits={self.num_splits}, fn={self.fn})"
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         b, c, f, t = x.shape
 
         remainder = f % self.num_splits
@@ -469,7 +469,7 @@ class Bandsplit(nn.Module):
             f = f + padding
 
         x = rearrange(x, 'b c (n f) t -> b (n c) f t', n=self.num_splits)
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
         x = rearrange(x, 'b (n c) f t -> b c (n f) t', n=self.num_splits)
 
         if remainder != 0:
@@ -491,7 +491,7 @@ class TimeSplit(nn.Module):
     def __repr__(self):
         return f"TimeSplit(shape={self.shape}, num_splits={self.num_splits}, fn={self.fn})"
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         b, c, f, t = x.shape
         remainder = t % self.num_splits
         if remainder != 0:
@@ -500,7 +500,7 @@ class TimeSplit(nn.Module):
             t = t + padding
 
         x = rearrange(x, 'b c f (n t) -> b (n c) f t', n=self.num_splits)
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
         x = rearrange(x, 'b (n c) f t -> b c f (n t)', n=self.num_splits)
 
         if remainder != 0:
@@ -518,11 +518,11 @@ class Condition(nn.Module):
     def __repr__(self):
         return f"Condition(condition={self.condition}, true_fn={self.true_fn}, false_fn={self.false_fn})"
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         if self.condition(x):
-            return self.true_fn(x)
+            return self.true_fn(x, **kwargs)
         else:
-            return self.false_fn(x)
+            return self.false_fn(x, **kwargs)
 
 
 class ReshapeBCT(nn.Module):
@@ -534,10 +534,10 @@ class ReshapeBCT(nn.Module):
     def __repr__(self):
         return f"ReshapeBCT(reshape_to='{self.reshape_to}', fn={self.fn})"
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         original_shape_context = parse_shape(x, 'b c t')
-        x_intermediate = rearrange(x, f'b c t -> {self.reshape_to}', **original_shape_context)
-        x_processed = self.fn(x_intermediate)
+        x = rearrange(x, f'b c t -> {self.reshape_to}', **original_shape_context)
+        x_processed = self.fn(x, **kwargs)
         processed_shape_context = parse_shape(x_processed, self.reshape_to)
         output = rearrange(x_processed, f'{self.reshape_to} -> b c t', **processed_shape_context)
         return output
@@ -551,8 +551,8 @@ class Module(nn.Module):
     def __repr__(self):
         return f"Module(fn={self.fn})"
 
-    def forward(self, x):
-        return self.fn(x)
+    def forward(self, x, **kwargs):
+        return self.fn(x, **kwargs)
 
 
 class SideEffect(nn.Module):
@@ -563,8 +563,8 @@ class SideEffect(nn.Module):
     def __repr__(self):
         return f"SideEffect(fn={self.fn})"
 
-    def forward(self, x):
-        self.fn(x)
+    def forward(self, x, **kwargs):
+        self.fn(x, **kwargs)
         return x
 
 
@@ -573,12 +573,12 @@ class ComplexMask(nn.Module):
         super().__init__()
         self.fn = Seq(*args)
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         b, c, f, t = x.shape
         x_complex = torch.view_as_complex(
             rearrange(x.float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
         )
-        mask_out = self.fn(x)
+        mask_out = self.fn(x, **kwargs)
         mask_complex = torch.view_as_complex(
             rearrange(mask_out.float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
         )
@@ -598,10 +598,10 @@ class FFT1dAndInverse(nn.Module):
     def __repr__(self):
         return f"ToFFT(channels={self.channels}, fn={self.fn})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         original_time_dim = x.shape[-1]
         x = self.fft(x)
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
         x = self.fft.inverse(x, original_time_dim)
         return x
 
@@ -616,11 +616,11 @@ class FFT2dAndInverse(nn.Module):
     def __repr__(self):
         return f"ToFFT2d(shape={self.shape}, fn={self.fn})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         original_freq_dim = x.shape[2]
         original_time_dim = x.shape[3]
         x = self.fft(x)
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
         x = self.fft.inverse(x, original_freq_dim, original_time_dim)
         return x
 
@@ -633,7 +633,7 @@ class FFT1d(nn.Module):
     def __repr__(self):
         return f"ToFFT1dOnly()"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x = self.fft(x)
         return x
 
@@ -646,7 +646,7 @@ class FFT2d(nn.Module):
     def __repr__(self):
         return f"ToFFT1dOnly()"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x = self.fft(x)
         return x
 
@@ -669,7 +669,7 @@ class STFTAndInverse(nn.Module):
     def __repr__(self):
         return f"STFTAndInverse(in_channels={self.in_channels}, in_samples={self.in_samples}, out_f={self.out_f}, hop_length={self.hop_length}, fn={self.fn})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         if x.shape[1] != self.in_channels:
             raise ValueError(
                 f"Input tensor has {x.shape[1]} channels, but model expects {self.in_channels} channels"
@@ -677,7 +677,7 @@ class STFTAndInverse(nn.Module):
         original_length = x.shape[-1]
         x = self.stft(x.float())
         x = x[:, :, :-1, :]
-        x = self.fn(x)
+        x = self.fn(x, **kwargs)
         nyquist_bin = torch.zeros_like(x[:, :, :1, :])
         x = torch.cat([x, nyquist_bin], dim=2)
         x = self.stft.inverse(x, original_length)
@@ -696,7 +696,7 @@ class ToSTFT(nn.Module):
     def __repr__(self):
         return f"STFTOnly(in_channels={self.in_channels}, in_samples={self.in_samples}, out_f={self.out_f}, hop_length={self.hop_length})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         if x.shape[1] != self.in_channels:
             raise ValueError(
                 f"Input tensor has {x.shape[1]} channels, but model expects {self.in_channels} channels"
@@ -709,7 +709,7 @@ class Zeroes(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         return torch.zeros_like(x)
 
 
@@ -717,23 +717,13 @@ class Ones(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         return torch.ones_like(x)
 
 
 class SplitNTensor(nn.Module):
     def __init__(self, shape: CFTShape, fns: List[Callable], split_points: List[int], dim: int = 1,
                  concat_dim=1):
-        """
-        Split tensor at specified points along a dimension, apply separate functions to each split, then concatenate.
-
-        Args:
-            shape: CFTShape object describing the input tensor shape
-            fns: List of functions that take (CFTShape, index) and return a module/function
-            split_points: List of indices where to split the tensor (exclusive end points)
-            dim: Dimension along which to split
-            concat_dim: Dimension along which to concatenate outputs (defaults to dim if None)
-        """
         super().__init__()
         self.shape = shape
         self.dim = dim
@@ -747,7 +737,6 @@ class SplitNTensor(nn.Module):
                 f"({self.n_splits}) created by {len(split_points)} split points"
             )
 
-        # Calculate the size along the split dimension
         if dim == 1:
             total_size = shape.c
         elif dim == 2:
@@ -757,14 +746,12 @@ class SplitNTensor(nn.Module):
         else:
             raise ValueError(f"Unsupported dimension {dim} for CFTShape")
 
-        # Validate split points
         for i, point in enumerate(self.split_points):
             if point <= 0 or point >= total_size:
                 raise ValueError(f"Split point {point} is out of bounds for dimension size {total_size}")
             if i > 0 and point <= self.split_points[i - 1]:
                 raise ValueError(f"Split points must be in ascending order, got {self.split_points}")
 
-        # Create split shapes and instantiate functions
         self.fns = nn.ModuleList()
         start = 0
 
@@ -774,7 +761,6 @@ class SplitNTensor(nn.Module):
             self.fns.append(fns[i](split_shape, i))
             start = split_point
 
-        # Handle final split
         final_size = total_size - start
         final_split_shape = self._create_split_shape(shape, final_size, dim)
         self.fns.append(fns[-1](final_split_shape, len(self.split_points)))
@@ -782,20 +768,18 @@ class SplitNTensor(nn.Module):
         self.streams = [torch.cuda.Stream() for _ in range(len(self.fns) - 1)]
 
     def _create_split_shape(self, original_shape: CFTShape, size: int, dim: int) -> CFTShape:
-        """Create a new CFTShape for a split with the given size along the specified dimension."""
-        if dim == 1:  # channels
+        if dim == 1:
             return replace(original_shape, c=size)
-        elif dim == 2:  # frequency
+        elif dim == 2:
             return replace(original_shape, f=size)
-        elif dim == 3:  # time
+        elif dim == 3:
             return replace(original_shape, t=size)
         else:
             raise ValueError(f"Unsupported dimension {dim}")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         dim_size = x.size(self.dim)
 
-        # Create views (fast, zero-copy)
         splits = []
         start = 0
         for split_point in self.split_points:
@@ -803,45 +787,29 @@ class SplitNTensor(nn.Module):
             start = split_point
         splits.append(x.narrow(self.dim, start, dim_size - start))
 
-        # Prepare outputs list
         outputs = [torch.empty(0)] * len(splits)
 
-        # Get current (default) stream
         default_stream = torch.cuda.current_stream()
 
-        # 2. SYNC: Record event that input 'x' is ready
-        # Side streams must wait for this event before reading 'x'
         input_ready_event = torch.cuda.Event()
         input_ready_event.record(default_stream)
 
-        # --- Parallel Execution ---
+        outputs[0] = self.fns[0](splits[0], **kwargs)
 
-        # Branch 0: Run on Default Stream (No overhead)
-        outputs[0] = self.fns[0](splits[0])
-
-        # Branches 1..N: Run on Side Streams
         side_stream_events = []
 
         for i, stream in enumerate(self.streams):
             split_idx = i + 1
             with torch.cuda.stream(stream):
-                # A. Wait for input data to be ready (Prevents NaNs)
                 stream.wait_event(input_ready_event)
-
-                # B. Compute
-                outputs[split_idx] = self.fns[split_idx](splits[split_idx])
-
-                # C. Record completion (Non-blocking)
+                outputs[split_idx] = self.fns[split_idx](splits[split_idx], **kwargs)
                 event = torch.cuda.Event()
                 event.record(stream)
                 side_stream_events.append(event)
 
-        # 3. SYNC: Default stream waits for all side streams
-        # Prevents torch.cat from reading empty/garbage memory (NaNs)
         for event in side_stream_events:
             default_stream.wait_event(event)
 
-        # 4. Concatenate (Safe now)
         return torch.cat(outputs, dim=self.concat_dim)
 
     def __repr__(self) -> str:
@@ -861,11 +829,11 @@ class Checkpoint(nn.Module):
     def __repr__(self):
         return f"Checkpoint(fn={self.fn})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         if self.training:
             return checkpoint(self.fn, x, use_reentrant=False)
         else:
-            return self.fn(x)
+            return self.fn(x, **kwargs)
 
 
 class WithShape(nn.Module):
@@ -877,8 +845,8 @@ class WithShape(nn.Module):
     def __repr__(self):
         return f"WithShape(shape={self.shape}, fn={self.fn})"
 
-    def forward(self, x):
-        return self.fn(x)
+    def forward(self, x, **kwargs):
+        return self.fn(x, **kwargs)
 
 
 class Interpolate(nn.Module):
@@ -900,7 +868,7 @@ class Interpolate(nn.Module):
     def __repr__(self):
         return f"Interpolate(size={self.size}, scale_factor={self.scale_factor}, mode='{self.mode}', align_corners={self.align_corners}, recompute_scale_factor={self.recompute_scale_factor}, antialias={self.antialias})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         return F.interpolate(
             x,
             size=self.size,
@@ -923,7 +891,7 @@ class ToMagnitudeAndInverse(nn.Module):
     def __repr__(self):
         return f"ToMagnitudeAndInverse(shape={self.shape}, fn={self.fn}, eps={self.eps}, retain_phase={self.retain_phase})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         real_parts = x[:, 0::2, :, :]
         imag_parts = x[:, 1::2, :, :]
         magnitude = torch.sqrt(real_parts ** 2 + imag_parts ** 2 + self.eps)
@@ -964,7 +932,7 @@ class ToMagnitude(nn.Module):
     def __repr__(self):
         return f"ToMagnitudeOnly(eps={self.eps})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         real_parts = x[:, 0::2, :, :]
         imag_parts = x[:, 1::2, :, :]
 
@@ -982,7 +950,7 @@ class Gamma(nn.Module):
     def __repr__(self):
         return f"Gamma(gamma={self.gamma}, eps={self.eps})"
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x_normalized = torch.abs(x) + self.eps
         x_gamma = torch.pow(x_normalized, 1.0 / self.gamma)
         return torch.sign(x) * x_gamma
