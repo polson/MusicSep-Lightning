@@ -9,15 +9,12 @@ class Seq(nn.Module):
         self.name = "Seq"
         self.modules_list = nn.ModuleList(modules)
 
-        new_modules = nn.ModuleList()
-        for module in self.modules_list:
-            new_modules.append(module)
-        self.modules_list = new_modules
-
     def forward(self, x, **kwargs):
+        pending_kwargs = kwargs.copy()
+
         for i, module in enumerate(self.modules_list):
             try:
-                x = self.run_module(x, module, **kwargs)
+                x = self._run_module(x, module, pending_kwargs)
             except Exception as e:
                 if not isinstance(e, SeqException):
                     seq_e = SeqException(str(e))
@@ -28,23 +25,56 @@ class Seq(nn.Module):
                     raise
         return x
 
-    def run_module(self, x, module, **kwargs):
-        if isinstance(x, tuple):
-            try:
-                x = module(*x, **kwargs)
-            except TypeError:
-                # Module doesn't accept kwargs, try without
-                try:
-                    x = module(*x)
-                except TypeError:
-                    x = module(x[0])
+    def _run_module(self, x, module, pending_kwargs):
+        if not pending_kwargs:
+            return module(x)
+
+        import inspect
+        sig = inspect.signature(module.forward)
+        params = list(sig.parameters.values())
+
+        # Check if module accepts **kwargs
+        has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+
+        if has_var_keyword:
+            return module(x, **pending_kwargs)
+
+        # Get extra params beyond the first one (which is x/input)
+        extra_params = [p for p in params[1:] if p.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY
+        )]
+
+        if not extra_params:
+            return module(x)
+
+        # Try to match by name first
+        matched_kwargs = {}
+        for param in extra_params:
+            if param.name in pending_kwargs:
+                matched_kwargs[param.name] = pending_kwargs[param.name]
+
+        print(f"Extra params for {module.__class__.__name__}: {[p.name for p in extra_params]}")
+
+        # If we matched by name, use those
+        if matched_kwargs:
+            # print(f"Debug: {module.__class__.__name__} matched kwargs by name: {list(matched_kwargs.keys())}")
+            return module(x, **matched_kwargs)
         else:
-            try:
-                x = module(x, **kwargs)
-            except TypeError:
-                # Module doesn't accept kwargs, call without them
-                x = module(x)
-        return x
+        # print(f"Debug: {module.__class__.__name__} found no matching kwargs by name.")
+
+        # Fall back to positional matching with error
+        extra_param_names = [p.name for p in extra_params]
+        pending_keys = list(pending_kwargs.keys())
+        pending_values = list(pending_kwargs.values())
+        args_to_pass = pending_values[:len(extra_params)]
+
+        if args_to_pass:
+            print(f"Warning: No name match for {module.__class__.__name__}. "
+                  f"Passing kwargs {pending_keys[:len(args_to_pass)]} "
+                  f"positionally to params {extra_param_names[:len(args_to_pass)]}")
+
+        return module(x, *args_to_pass)
 
 
 class SeqException(Exception):

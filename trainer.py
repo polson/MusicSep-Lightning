@@ -40,7 +40,7 @@ class AudioSourceSeparation(L.LightningModule):
                 root_dir=str(Path(self.config.paths.dataset) / "test"),
                 duration_seconds=config.training.duration,
                 targets=config.training.target_sources,
-                aligned_mixture=False
+                aligned_mixture=config.training.aligned
             )
         )
         self.debug_mixture = None
@@ -192,6 +192,7 @@ class AudioSourceSeparation(L.LightningModule):
         )
 
     def validation_step(self, batch, batch_idx):
+        print("VALIDATION")
         mixture_path = batch["mixture_path"][0]
         target_paths = batch["target_paths"]
         predictions = self.separator.process_file(
@@ -241,6 +242,8 @@ class AudioSourceSeparation(L.LightningModule):
             x_flat = rearrange(x, "b n c t -> (b n) c t")
 
             predicted_velocity, _ = self.model(x_flat, mixture=mixture_flat, t=t_val)
+            print(x.shape)
+            print(predicted_velocity.shape)
             x = x + predicted_velocity * dt
 
         return x

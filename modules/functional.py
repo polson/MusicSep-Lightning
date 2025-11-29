@@ -39,7 +39,7 @@ class ReshapeBCFT(nn.Module):
 class DebugShape(nn.Module):
     def __init__(self, name: str = None):
         super().__init__()
-        self.fn = nn.Identity()
+        self.fn = Seq(nn.Identity())
         self.name = name
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -512,17 +512,16 @@ class Condition(nn.Module):
     def __init__(self, condition, true_fn, false_fn=None):
         super().__init__()
         self.condition = condition
-        self.true_fn = true_fn()
-        self.false_fn = false_fn() if false_fn is not None else nn.Identity()
-
-    def __repr__(self):
-        return f"Condition(condition={self.condition}, true_fn={self.true_fn}, false_fn={self.false_fn})"
+        self.true_fn = Seq(true_fn())
+        self.false_fn = Seq(false_fn()) if false_fn is not None else None
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         if self.condition(x):
             return self.true_fn(x, **kwargs)
-        else:
+        elif self.false_fn is not None:
             return self.false_fn(x, **kwargs)
+        else:
+            return x
 
 
 class ReshapeBCT(nn.Module):
