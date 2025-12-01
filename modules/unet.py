@@ -91,7 +91,7 @@ class UNet(nn.Module):
 
             current_shape = output_shape
 
-        self.bottleneck_fn = bottleneck_fn(current_shape) if bottleneck_fn else nn.Identity()
+        self.bottleneck_fn = bottleneck_fn(current_shape) if bottleneck_fn else Seq(nn.Identity())
 
         self.bottleneck_dropout = nn.Dropout2d(dropout_rate) if dropout_rate > 0 and dropout_in_bottleneck else None
 
@@ -123,8 +123,8 @@ class UNet(nn.Module):
     def __repr__(self):
         return f"UNet(input_shape={self.input_shape}, channels={self.channels}"
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, f, t = x.shape
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        b, c, f, t_dim = x.shape
 
         num_downsamples = len(self.channels) - 1
         freq_multiple = self.stride[0] ** num_downsamples
@@ -132,7 +132,7 @@ class UNet(nn.Module):
 
         f_remainder = f % freq_multiple
         f_pad = (freq_multiple - f_remainder) % freq_multiple
-        t_remainder = t % time_multiple
+        t_remainder = t_dim % time_multiple
         t_pad = (time_multiple - t_remainder) % time_multiple
 
         padding = (0, t_pad, 0, f_pad)
@@ -145,31 +145,31 @@ class UNet(nn.Module):
         for i, downsample in enumerate(self.downsample_layers):
             encoder_outputs.append(current)
             if self.pre_downsample_modules is not None:
-                current = self.pre_downsample_modules[i](current)
-            current = downsample(current)
+                current = self.pre_downsample_modules[i](current, **kwargs)
+            current = downsample(current, **kwargs)
             if self.post_downsample_modules is not None:
-                current = self.post_downsample_modules[i](current)
+                current = self.post_downsample_modules[i](current, **kwargs)
             if self.downsample_dropout is not None:
                 current = self.downsample_dropout[i](current)
 
-        current = self.bottleneck_fn(current)
+        current = self.bottleneck_fn(current, **kwargs)
         if self.bottleneck_dropout is not None:
             current = self.bottleneck_dropout(current)
 
         for i, upsample in enumerate(self.upsample_layers):
             current = upsample(current)
             if self.post_upsample_modules is not None:
-                current = self.post_upsample_modules[i](current)
+                current = self.post_upsample_modules[i](current, **kwargs)
             if self.upsample_dropout is not None:
                 current = self.upsample_dropout[i](current)
             skip = encoder_outputs[len(encoder_outputs) - 1 - i]
             current = self.skip_fn(current, skip)
             if self.post_skip_modules is not None:
-                current = self.post_skip_modules[i](current)
+                current = self.post_skip_modules[i](current, **kwargs)
 
         output = self.final_conv(current)
 
         if f_pad > 0 or t_pad > 0:
-            output = output[:, :, :f, :t]
+            output = output[:, :, :f, :t_dim]
 
         return output

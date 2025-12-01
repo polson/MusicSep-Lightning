@@ -16,7 +16,7 @@ class BaseModel(nn.Module, ABC):
         self.is_debug = False
         self.is_validating = False
 
-        self.visualize = lambda name, transform=nn.Identity(): Condition(
+        self.visualize = lambda name, transform=Seq(nn.Identity()): Condition(
             condition=lambda x: self.is_debug,
             true_fn=lambda: SideEffect(
                 Seq(
@@ -50,21 +50,29 @@ class BaseModel(nn.Module, ABC):
         self.is_validating = False
         return result
 
-    def debug_forward(self, x, targets=None):
-        self.is_debug = True
-        mixture = x
-        t = torch.ones(x.shape[0], device=x.device)
-        x, _ = self.forward(x, t=t)
+    def debug_forward(self, mixture, separated, targets):
+        """
+        Visualize debug outputs.
 
-        self.visualize("mixture_mag", Seq(
-            ToSTFT(),
-            ToMagnitude(),
-        ))(mixture)
+        Args:
+            mixture: Original mixture waveform (b, c, t)
+            separated: Model's separated output from iterative_inference (b, n, c, t)
+            targets: Ground truth targets (b, n, c, t)
+        """
+        self.is_debug = True
         self.visualize("progress_mag", Seq(
             Rearrange("b n c t -> (b n) c t"),
             ToSTFT(),
             ToMagnitude(),
-        ))(x)
+        ))(separated)
+        self.visualize("progress_stft", Seq(
+            Rearrange("b n c t -> (b n) c t"),
+            ToSTFT(),
+        ))(separated)
+        self.visualize("mixture_mag", Seq(
+            ToSTFT(),
+            ToMagnitude(),
+        ))(mixture)
         self.visualize("target_mag", Seq(
             Rearrange("b n c t -> (b n) c t"),
             ToSTFT(),
@@ -73,12 +81,9 @@ class BaseModel(nn.Module, ABC):
         self.visualize("mixture_stft", Seq(
             ToSTFT(),
         ))(mixture)
-        self.visualize("progress_stft", Seq(
-            Rearrange("b n c t -> (b n) c t"),
-            ToSTFT(),
-        ))(x)
         self.visualize("target_stft", Seq(
             Rearrange("b n c t -> (b n) c t"),
             ToSTFT(),
         ))(targets)
+
         self.is_debug = False

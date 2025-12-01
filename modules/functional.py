@@ -663,7 +663,7 @@ class STFTAndInverse(nn.Module):
             t=(in_samples + hop_length - 1) // hop_length
         )
         self.fn = fn(out_shape)
-        self.stft = STFT(n_fft=n_fft, hop_length=hop_length)
+        self.stft = ToSTFT(n_fft=n_fft, hop_length=hop_length)
 
     def __repr__(self):
         return f"STFTAndInverse(in_channels={self.in_channels}, in_samples={self.in_samples}, out_f={self.out_f}, hop_length={self.hop_length}, fn={self.fn})"
@@ -675,7 +675,6 @@ class STFTAndInverse(nn.Module):
             )
         original_length = x.shape[-1]
         x = self.stft(x.float())
-        x = x[:, :, :-1, :]
         x = self.fn(x, **kwargs)
         nyquist_bin = torch.zeros_like(x[:, :, :1, :])
         x = torch.cat([x, nyquist_bin], dim=2)
@@ -701,6 +700,29 @@ class ToSTFT(nn.Module):
                 f"Input tensor has {x.shape[1]} channels, but model expects {self.in_channels} channels"
             )
         x = self.stft(x.float())
+        x = x[:, :, :-1, :]
+        return x
+
+
+class InverseSTFT(nn.Module):
+    def __init__(self, in_channels=2, out_samples=44100, n_fft=2048, hop_length=512):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_samples = out_samples
+        self.in_f = n_fft // 2 + 1
+        self.hop_length = hop_length
+        self.n_fft = n_fft
+        self.stft = STFT(n_fft=n_fft, hop_length=hop_length)
+
+    def __repr__(self):
+        return f"InverseSTFT(in_channels={self.in_channels}, out_samples={self.out_samples}, in_f={self.in_f}, hop_length={self.hop_length})"
+
+    def forward(self, x, length=None, **kwargs):
+        # x shape: (batch, channels*2, freq, time) - complex as real/imag channels
+        target_length = length if length is not None else self.out_samples
+        nyquist_bin = torch.zeros_like(x[:, :, :1, :])
+        x = torch.cat([x, nyquist_bin], dim=2)
+        x = self.stft.inverse(x, target_length)
         return x
 
 
@@ -879,42 +901,49 @@ class Interpolate(nn.Module):
         )
 
 
-class ToMagnitudeAndInverse(nn.Module):
-    def __init__(self, shape: CFTShape, fn, eps=1e-6, retain_phase=True):
+class ToMagnitude(nn.Module):
+    def __init__(self, eps=1e-6):
         super().__init__()
-        self.shape = shape
-        self.fn = fn(CFTShape(c=shape.c // 2, f=shape.f, t=shape.t))
         self.eps = eps
-        self.retain_phase = retain_phase
 
     def __repr__(self):
-        return f"ToMagnitudeAndInverse(shape={self.shape}, fn={self.fn}, eps={self.eps}, retain_phase={self.retain_phase})"
+        return f"ToMagnitude(eps={self.eps})"
 
     def forward(self, x, **kwargs):
         real_parts = x[:, 0::2, :, :]
         imag_parts = x[:, 1::2, :, :]
         magnitude = torch.sqrt(real_parts ** 2 + imag_parts ** 2 + self.eps)
-        processed_magnitude = self.fn(magnitude)
+        return magnitude
+
+
+class FromMagnitude(nn.Module):
+    def __init__(self, eps=1e-6, retain_phase=True):
+        super().__init__()
+        self.eps = eps
+        self.retain_phase = retain_phase
+
+    def __repr__(self):
+        return f"FromMagnitude(eps={self.eps}, retain_phase={self.retain_phase})"
+
+    def forward(self, processed_magnitude, original_complex, **kwargs):
+        real_parts = original_complex[:, 0::2, :, :]
+        imag_parts = original_complex[:, 1::2, :, :]
+        magnitude = torch.sqrt(real_parts ** 2 + imag_parts ** 2 + self.eps)
+
         expansion = processed_magnitude.shape[1] // magnitude.shape[1]
 
         if self.retain_phase:
             phase = torch.atan2(imag_parts, real_parts)
-
-            # Channels may have expanded if separating multiple instruments
             phase_expanded = phase.repeat_interleave(expansion, dim=1)
             new_real = processed_magnitude * torch.cos(phase_expanded)
             new_imag = processed_magnitude * torch.sin(phase_expanded)
         else:
-            processed_magnitude = self.fn(magnitude)
-            mask = processed_magnitude / (magnitude + self.eps)
-
-            # Channels may have expanded if separating multiple instruments
+            mask = processed_magnitude / (magnitude.repeat_interleave(expansion, dim=1) + self.eps)
             real_expanded = real_parts.repeat_interleave(expansion, dim=1)
             imag_expanded = imag_parts.repeat_interleave(expansion, dim=1)
             new_real = real_expanded * mask
             new_imag = imag_expanded * mask
 
-        # Create output interleaving real and imaginary
         batch, out_channels, freq, time = new_real.shape
         output = torch.zeros(batch, out_channels * 2, freq, time,
                              dtype=new_real.dtype, device=new_real.device)
@@ -923,21 +952,23 @@ class ToMagnitudeAndInverse(nn.Module):
         return output
 
 
-class ToMagnitude(nn.Module):
-    def __init__(self, eps=1e-6):
+class ToMagnitudeAndInverse(nn.Module):
+    def __init__(self, shape: CFTShape, fn, eps=1e-6, retain_phase=True):
         super().__init__()
+        self.shape = shape
+        self.fn = fn(CFTShape(c=shape.c // 2, f=shape.f, t=shape.t))
         self.eps = eps
+        self.retain_phase = retain_phase
+        self.to_mag = ToMagnitude(eps=eps)
+        self.from_mag = FromMagnitude(eps=eps, retain_phase=retain_phase)
 
     def __repr__(self):
-        return f"ToMagnitudeOnly(eps={self.eps})"
+        return f"ToMagnitudeAndInverse(shape={self.shape}, fn={self.fn}, eps={self.eps}, retain_phase={self.retain_phase})"
 
     def forward(self, x, **kwargs):
-        real_parts = x[:, 0::2, :, :]
-        imag_parts = x[:, 1::2, :, :]
-
-        magnitude = torch.sqrt(real_parts ** 2 + imag_parts ** 2 + self.eps)
-
-        return magnitude
+        magnitude = self.to_mag(x, **kwargs)
+        processed_magnitude = self.fn(magnitude, **kwargs)
+        return self.from_mag(processed_magnitude, x, **kwargs)
 
 
 class Gamma(nn.Module):
@@ -953,3 +984,35 @@ class Gamma(nn.Module):
         x_normalized = torch.abs(x) + self.eps
         x_gamma = torch.pow(x_normalized, 1.0 / self.gamma)
         return torch.sign(x) * x_gamma
+
+
+class FlowMatchingNoise(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(
+            self,
+            targets: torch.Tensor,
+            timestep: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        b = targets.shape[0]
+        device = targets.device
+
+        if timestep is None:
+            timestep = torch.rand(b, device=device)
+
+        if timestep.dim() == 1:
+            t = timestep.view(b, *([1] * (targets.dim() - 1)))
+        elif timestep.dim() == 3 and timestep.shape[1:] == (1, 1):
+            if targets.dim() == 4:
+                t = timestep.unsqueeze(1)
+            else:
+                t = timestep
+        else:
+            t = timestep
+
+        noise = torch.randn_like(targets)
+        noisy = (1 - t) * noise + t * targets
+        target_velocity = targets - noise
+
+        return noisy, target_velocity, timestep

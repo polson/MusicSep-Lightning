@@ -1,18 +1,47 @@
 import sys
-
 from torch import nn
+
+
+class Select:
+    """Marker to select which kwarg becomes the main input."""
+
+    def __init__(self, name):
+        self.name = name
 
 
 class Seq(nn.Module):
     def __init__(self, *modules):
         super().__init__()
         self.name = "Seq"
-        self.modules_list = nn.ModuleList(modules)
+
+        # Filter out Select markers and track them
+        self.select_indices = {}  # index -> kwarg name
+        actual_modules = []
+
+        for i, m in enumerate(modules):
+            if isinstance(m, Select):
+                # This Select applies to the next module
+                self.select_indices[len(actual_modules)] = m.name
+            else:
+                actual_modules.append(m)
+
+        self.modules_list = nn.ModuleList(actual_modules)
 
     def forward(self, x, **kwargs):
         pending_kwargs = kwargs.copy()
 
         for i, module in enumerate(self.modules_list):
+            # Check if this module should operate on a different input
+            if i in self.select_indices:
+                kwarg_name = self.select_indices[i]
+                if kwarg_name in pending_kwargs:
+                    # Swap: current x goes into kwargs, selected kwarg becomes x
+                    old_x = x
+                    x = pending_kwargs[kwarg_name]
+                    pending_kwargs[kwarg_name] = old_x
+                else:
+                    raise ValueError(f"Select('{kwarg_name}') but '{kwarg_name}' not in kwargs")
+
             try:
                 x = self._run_module(x, module, pending_kwargs)
             except Exception as e:
@@ -27,54 +56,61 @@ class Seq(nn.Module):
 
     def _run_module(self, x, module, pending_kwargs):
         if not pending_kwargs:
-            return module(x)
-
-        import inspect
-        sig = inspect.signature(module.forward)
-        params = list(sig.parameters.values())
-
-        # Check if module accepts **kwargs
-        has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
-
-        if has_var_keyword:
-            return module(x, **pending_kwargs)
-
-        # Get extra params beyond the first one (which is x/input)
-        extra_params = [p for p in params[1:] if p.kind in (
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY
-        )]
-
-        if not extra_params:
-            return module(x)
-
-        # Try to match by name first
-        matched_kwargs = {}
-        for param in extra_params:
-            if param.name in pending_kwargs:
-                matched_kwargs[param.name] = pending_kwargs[param.name]
-
-        print(f"Extra params for {module.__class__.__name__}: {[p.name for p in extra_params]}")
-
-        # If we matched by name, use those
-        if matched_kwargs:
-            # print(f"Debug: {module.__class__.__name__} matched kwargs by name: {list(matched_kwargs.keys())}")
-            return module(x, **matched_kwargs)
+            result = module(x)
         else:
-        # print(f"Debug: {module.__class__.__name__} found no matching kwargs by name.")
+            import inspect
+            sig = inspect.signature(module.forward)
+            params = list(sig.parameters.values())
 
-        # Fall back to positional matching with error
-        extra_param_names = [p.name for p in extra_params]
-        pending_keys = list(pending_kwargs.keys())
-        pending_values = list(pending_kwargs.values())
-        args_to_pass = pending_values[:len(extra_params)]
+            has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
 
-        if args_to_pass:
-            print(f"Warning: No name match for {module.__class__.__name__}. "
-                  f"Passing kwargs {pending_keys[:len(args_to_pass)]} "
-                  f"positionally to params {extra_param_names[:len(args_to_pass)]}")
+            if has_var_keyword:
+                result = module(x, **pending_kwargs)
+            else:
+                extra_params = [p for p in params[1:] if p.kind in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY
+                )]
 
-        return module(x, *args_to_pass)
+                if not extra_params:
+                    result = module(x)
+                else:
+                    matched_kwargs = {}
+                    for param in extra_params:
+                        if param.name in pending_kwargs:
+                            matched_kwargs[param.name] = pending_kwargs[param.name]
+
+                    if matched_kwargs:
+                        result = module(x, **matched_kwargs)
+                    else:
+                        extra_param_names = [p.name for p in extra_params]
+                        pending_keys = list(pending_kwargs.keys())
+                        pending_values = list(pending_kwargs.values())
+                        args_to_pass = pending_values[:len(extra_params)]
+
+                        if args_to_pass:
+                            print(f"Warning: No name match for {module.__class__.__name__}. "
+                                  f"Passing kwargs {pending_keys[:len(args_to_pass)]} "
+                                  f"positionally to params {extra_param_names[:len(args_to_pass)]}")
+
+                        result = module(x, *args_to_pass)
+
+        # Handle tuple returns: (output, dict_to_merge)
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+            x, new_kwargs = result
+            pending_kwargs.update(new_kwargs)
+            return x
+
+        return result
+
+    def __getitem__(self, idx):
+        return self.modules_list[idx]
+
+    def __len__(self):
+        return len(self.modules_list)
+
+    def __iter__(self):
+        return iter(self.modules_list)
 
 
 class SeqException(Exception):

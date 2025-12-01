@@ -1,94 +1,115 @@
 import math
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
-from einops import rearrange
+from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 
 from loss import LossFactory, LossType
 from model.base_model import BaseModel
-from model.magsep.rwkv import BiRWKV
-from modules.functional import STFTAndInverse, ReshapeBCFT, Module
+from model.magsep.rwkv import BiRWKVLayer
+from modules.functional import STFTAndInverse, ReshapeBCFT, Module, ComplexMask, WithShape, CFTShape, DebugShape, \
+    Residual, Repeat, Bandsplit, ToMagnitudeAndInverse, FFT2dAndInverse, Mask
+from modules.self_attention import SelfAttention
 from modules.seq import Seq
 from modules.stft import STFT
+from modules.unet import UNet
 
 
 class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim, max_period=10000):
+    def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.max_period = max_period
 
-    def forward(self, x):
-        half = self.dim // 2
-        freqs = torch.exp(
-            -math.log(self.max_period) * torch.arange(half, device=x.device) / half
-        )
-        args = x[:, None] * freqs[None]
-        return torch.cat([args.cos(), args.sin()], dim=-1)
-
-
-class TimeEmbedding(nn.Module):
-    """FiLM conditioning for flow matching with sinusoidal time embeddings."""
-
-    def __init__(self, dim, time_embed_dim=1024):
-        super().__init__()
-        self.dim = dim
-        self.time_mlp = nn.Sequential(
-            SinusoidalPosEmb(time_embed_dim),
-            nn.Linear(time_embed_dim, dim),
-            nn.SiLU(),
-            nn.Linear(dim, dim * 2),
-        )
-        nn.init.zeros_(self.time_mlp[-1].weight)
-        nn.init.zeros_(self.time_mlp[-1].bias)
-
-    def forward(self, x, t, **kwargs):
-        t_flat = t.view(t.shape[0])
-        modulation = self.time_mlp(t_flat)
-
-        # x is (b, c, f, t) but c=1 and f=embed_dim
-        # So reshape to broadcast over f dimension
-        scale, shift = rearrange(modulation, 'b (two f) -> two b 1 f 1', two=2)
-
-        return (1 + scale) * x + shift
+    def forward(self, t):
+        device = t.device
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
 
 
 class AdaLN(nn.Module):
-    def __init__(self, dim, cond_dim, time_embed_dim=1024):
+    """
+    Adaptive Layer Norm with optional gating, following DiT design.
+    If return_gate=True: returns (modulated_x, gate) for use with GatedResidual
+    If return_gate=False: returns just modulated_x for standalone use
+    """
+
+    def __init__(self, dim, time_emb_dim=128, return_gate=False):
         super().__init__()
-        self.norm = nn.RMSNorm(dim)
 
-        # Time embedding
-        self.time_mlp = nn.Sequential(
-            SinusoidalPosEmb(time_embed_dim),
-            nn.Linear(time_embed_dim, dim),
+        self.return_gate = return_gate
+
+        out_dim = dim * 3 if return_gate else dim * 2
+        self.time_mlp = Seq(
+            SinusoidalPosEmb(time_emb_dim),
+            nn.Linear(time_emb_dim, time_emb_dim),
             nn.SiLU(),
-            nn.Linear(dim, dim),
+            nn.Linear(time_emb_dim, out_dim)
         )
 
-        # Combined projection: mixture features + time -> gamma, beta
-        self.to_gamma_beta = nn.Linear(dim * 2, dim * 2)
-        nn.init.zeros_(self.to_gamma_beta.weight)
-        nn.init.zeros_(self.to_gamma_beta.bias)
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False)
 
-        self.mixture_proj = Seq(
-            STFT(n_fft=2048, hop_length=512),
-            Rearrange("b c f t -> b 1 (f c) t"),
-            Rearrange("b c f t -> b c t f"),
-            Module(lambda x: x[:, :, :, :dim])  # or a learned projection
-        )
+        # Small-value initialization so block starts near-identity
+        # nn.init.constant_(self.time_mlp[-1].weight, 0.0)
+        # nn.init.constant_(self.time_mlp[-1].bias, 0.0)  # bias can stay at 0
 
-    def forward(self, x, mixture, t):
-        mix_cond = self.mixture_proj(mixture)  # (b, 1, t, dim)
-        time_cond = self.time_mlp(t.view(-1))  # (b, dim)
-        time_cond = time_cond[:, None, None, :]  # (b, 1, 1, dim) broadcast over t
+    def __repr__(self):
+        return f"AdaLN(dim={self.norm.normalized_shape[0]}, return_gate={self.return_gate})"
 
-        # Concatenate and project
-        cond = torch.cat([mix_cond, time_cond.expand_as(mix_cond)], dim=-1)
-        gamma, beta = self.to_gamma_beta(cond).chunk(2, dim=-1)
-        x = self.norm(x)
-        return x * (1 + gamma) + beta
+    def forward(self, x, t, **kwargs):
+        x_norm = self.norm(x)
+
+        # Ensure t is (batch_size,)
+        if t.ndim > 1:
+            t = t.view(t.shape[0])
+
+        # 24, 1, 512
+        t_emb = self.time_mlp(t)
+
+        # First match batch sizes for t and x
+        if x.shape[0] != t_emb.shape[0]:
+            splits = x.shape[0] // t_emb.shape[0]
+            t_emb = repeat(t_emb, 'b ... -> (b s) ...', s=splits)
+
+        # Now match dimensions for t so it can broadcast
+        if x.ndim == 4:
+            t_emb = t_emb[:, None, None, :]
+        elif x.ndim == 3:
+            t_emb = t_emb[:, None, :]
+
+        if self.return_gate:
+            scale, shift, gate = t_emb.chunk(3, dim=-1)
+            return x_norm * (1 + scale) + shift, gate
+        else:
+            scale, shift = t_emb.chunk(2, dim=-1)
+            return x_norm * (1 + scale) + shift
+
+
+class GatedResidual(nn.Module):
+    """
+    Residual block that expects the first module to return (x, gate).
+    Applies: x + gate * sublayer(x)
+    """
+
+    def __init__(self, adaln, *sublayers):
+        super().__init__()
+        self.adaln = adaln
+        self.sublayers = Seq(*sublayers)
+
+    def forward(self, x, **kwargs):
+        # AdaLN returns (modulated_x, gate)
+        modulated, gate = self.adaln(x, **kwargs)
+
+        # Pass through attention/FFN
+        out = self.sublayers(modulated)
+
+        # Gated residual connection
+        return x + gate * out
 
 
 class MagSplitModel(BaseModel):
@@ -106,60 +127,178 @@ class MagSplitModel(BaseModel):
         self.n_fft = n_fft
         self.hop_length = hop_length
 
-        embed_dim_1 = 768
-        embed_dim_2 = 256
-        embed_dim = embed_dim_1 + embed_dim_2
-
         self.loss_factory = LossFactory.create(LossType.MSE)
 
-        self.stft = nn.Identity()
-
-        # Input channels: 2 (noisy) + 2 (mixture) = 4
-        in_channels = 2
-
-        self.conditioning = lambda embed_dim, mixture_dim: Seq(
-            Rearrange("b c f t -> b c t f"),
-            AdaLN(embed_dim, cond_dim=mixture_dim),
-            Rearrange("b c t f -> b c f t"),
+        self.dit = lambda dim, reshape: Seq(
+            ReshapeBCFT(
+                reshape,
+                GatedResidual(
+                    AdaLN(dim, return_gate=True),
+                    SelfAttention(
+                        embed_dim=dim,
+                        num_heads=8,
+                        dropout=dropout,
+                        use_rope=True
+                    ),
+                ),
+                GatedResidual(
+                    AdaLN(dim, return_gate=True),
+                    nn.Linear(dim, dim * 4),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(dim * 4, dim),
+                    nn.Dropout(dropout),
+                ),
+            ),
         )
 
-        self.model = Seq(
-            STFTAndInverse(
-                in_channels=in_channels,  # Now handles concatenated input
-                n_fft=n_fft,
-                hop_length=hop_length,
-                fn=lambda shape: Seq(
-                    Seq(
-                        Rearrange("b c f t -> b 1 (f c) t"),
-                        Rearrange("b c f t -> b c t f"),
-                        nn.Linear(shape.f * shape.c, embed_dim),
-                        nn.RMSNorm(embed_dim),
-                        Rearrange("b c t f -> b c f t"),
-
-                        self.conditioning(embed_dim, shape.f * shape.c),
-                        ReshapeBCFT(
-                            "(b c) t f",
-                            BiRWKV(embed_dim, num_layers=1),
-                        ),
-
-                        self.conditioning(embed_dim, shape.f * shape.c),
-                        Rearrange("b c f t -> b c t f"),
-                        nn.RMSNorm(embed_dim),
-                        nn.Linear(embed_dim, embed_dim * 4),
-                        nn.SiLU(),
-                        nn.Linear(embed_dim * 4, (shape.f * shape.c)),
-                        Rearrange("b c t f -> b c f t"),
-
-                        Rearrange("b 1 (f c) t -> b c f t", c=shape.c),
+        self.rwkv = lambda dim, reshape: Seq(
+            ReshapeBCFT(
+                reshape,
+                GatedResidual(
+                    AdaLN(dim, return_gate=True),
+                    BiRWKVLayer(
+                        dim,
                     ),
+                ),
+                GatedResidual(
+                    AdaLN(dim, return_gate=True),
+                    nn.Linear(dim, dim * 2),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(dim * 2, dim),
+                    nn.Dropout(dropout),
+                ),
+            ),
+        )
+
+        self.rwkv_no_ada = lambda dim, reshape: Seq(
+            ReshapeBCFT(
+                reshape,
+                Residual(
+                    nn.LayerNorm(dim),
+                    BiRWKVLayer(
+                        dim,
+                    ),
+                ),
+                Residual(
+                    nn.LayerNorm(dim),
+                    nn.Linear(dim, dim * 4),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(dim * 4, dim),
+                    nn.Dropout(dropout),
+                ),
+            ),
+        )
+
+        self.unet = lambda shape: UNet(
+            input_shape=shape,
+            channels=[shape.c, 128, 256],
+            stride=(8, 1),
+            output_channels=shape.c,
+            post_downsample_fn=lambda shape: Seq(
+                Rearrange("b c f t -> b c t f"),
+                AdaLN(shape.f),
+                Rearrange("b c t f -> b c f t"),
+            ),
+            bottleneck_fn=lambda shape: Seq(
+                # Repeat(
+                #     1,
+                #     self.rwkv(shape.f, "(b c) t f"),
+                # ),
+            ),
+            post_upsample_fn=lambda shape: Seq(
+                Rearrange("b c f t -> b c t f"),
+                AdaLN(shape.f),
+                Rearrange("b c t f -> b c f t", c=shape.c),
+            ),
+            post_skip_fn=lambda shape: Seq(
+                Rearrange("b c f t -> b c t f"),
+                AdaLN(shape.f),
+                Rearrange("b c t f -> b c f t", c=shape.c),
+            )
+        )
+
+        embed_dim = 128
+
+        self.model = Seq(
+            WithShape(
+                shape=CFTShape(c=8, f=n_fft // 2, t=87),
+                fn=lambda shape: Seq(
+                    # nn.Conv2d(shape.c, shape.c, kernel_size=31, padding="same"),
+                    # nn.GELU(),
+
+                    # Rearrange("b c f t -> b c t f"),
+                    # AdaLN(shape.f),
+                    # Rearrange("b c t f -> b c f t", c=shape.c),
+
+                    # Rearrange("b c f t -> b 1 (f c) t"),
+                    # Seq(
+                    #     self.unet(replace(shape, c=1, f=shape.f * shape.c)),
+                    # ),
+                    # Rearrange("b 1 (f c) t -> b c f t", c=8),
+                    # ComplexMask(
+                    #     self.unet(shape),
+                    #     nn.Tanh()
+                    # ),
+                    # Repeat(6,
+                    #        Residual(
+                    #            self.unet(shape)
+                    #        ),
+                    #        ),
+                    #     )
+                    # ),
+
+                    # Rearrange("b c f t -> b c t f"),
+                    # AdaLN(shape.f),
+                    # Rearrange("b c t f -> b c f t"),
+                    # ToMagnitudeAndInverse(
+                    #     shape=shape,
+                    #     fn=lambda shape: Seq(
+                    #         self.unet(shape),
+                    #     )
+                    # ),
+
+                    # Rearrange("b c f t -> b c t f"),
+                    # AdaLN(shape.f),
+                    # Rearrange("b c t f -> b c f t"),
+                    # Rearrange("b c f t -> b c t f"),
+                    # AdaLN(shape.f),
+                    # ComplexMask(nn.Linear(shape.f, shape.f)),
+                    # Rearrange("b c t f -> b c f t"),
+
+                    Rearrange("b c f t -> b 1 (f c) t"),
+                    Bandsplit(
+                        shape=replace(shape, c=1, f=shape.f * (shape.c)),
+                        num_splits=64,
+                        fn=lambda shape: Seq(
+                            Rearrange("b c f t -> b c t f"),
+                            nn.Linear(shape.f, embed_dim),
+                            AdaLN(embed_dim),
+                            Rearrange("b c t f -> b c f t"),
+
+                            Repeat(
+                                6,
+                                self.dit(embed_dim, "(b c) t f"),
+                            ),
+
+                            Rearrange("b c f t -> b c t f"),
+                            AdaLN(embed_dim),
+                            nn.Linear(embed_dim, shape.f),
+                            nn.GLU(dim=-1),
+                            Rearrange("b c t f -> b c f t", c=shape.c),
+                        )
+                    ),
+                    Rearrange("b 1 (f c) t -> b c f t", c=4),
+
                 ),
             ),
         )
 
     def process(self, x, mixture, t=None):
-        b = x.shape[0]
-        n = self.num_instruments
+        x = torch.cat([x, mixture], dim=1)
+        # 'mixture' is still passed here, but AdaLN will ignore it via **kwargs
         x = self.model(x, t=t, mixture=mixture)
-        print(f"Output: mean={x.mean():.6f}, std={x.std():.6f}")
-        x = rearrange(x, 'b (n c) t -> b n c t', b=b, n=n)
+        # x = x[:, :4, :, :]
         return x

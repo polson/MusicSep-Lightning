@@ -32,7 +32,6 @@ class MSELoss(LossInterface, nn.Module):
         super().__init__()
 
     def calculate(self, prediction, target):
-        prediction = rearrange(prediction, "b n c t -> (b n) c t")
         return F.mse_loss(prediction, target)
 
 
@@ -45,10 +44,8 @@ class StftRmseLoss(LossInterface, nn.Module):
         )
 
     def calculate(self, prediction, target):
-        prediction = self.stft(prediction)
-        target = self.stft(target)
         loss = F.mse_loss(prediction, target)
-        return loss.sqrt() * 1000
+        return loss * 1000
 
 
 class MultiStftLoss(LossInterface, nn.Module):

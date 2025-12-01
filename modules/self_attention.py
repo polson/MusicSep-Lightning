@@ -56,7 +56,7 @@ class SelfAttention(nn.Module):
 
         self.dropout_p = dropout
 
-    def forward(self, x, context=None, attn_mask=None, is_causal=False):
+    def forward(self, x, context=None, attn_mask=None, is_causal=False, **kwargs):
         x_norm = self.norm(x)
 
         if context is not None:
