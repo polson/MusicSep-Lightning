@@ -3,17 +3,15 @@ from dataclasses import replace
 
 import torch
 import torch.nn as nn
-from einops import rearrange, repeat
+from einops import repeat
 from einops.layers.torch import Rearrange
 
 from loss import LossFactory, LossType
 from model.base_model import BaseModel
 from model.magsep.rwkv import BiRWKVLayer
-from modules.functional import STFTAndInverse, ReshapeBCFT, Module, ComplexMask, WithShape, CFTShape, DebugShape, \
-    Residual, Repeat, Bandsplit, ToMagnitudeAndInverse, FFT2dAndInverse, Mask
+from modules.functional import ReshapeBCFT, WithShape, CFTShape, Residual, Repeat, Bandsplit
 from modules.self_attention import SelfAttention
 from modules.seq import Seq
-from modules.stft import STFT
 from modules.unet import UNet
 
 
@@ -39,7 +37,7 @@ class AdaLN(nn.Module):
     If return_gate=False: returns just modulated_x for standalone use
     """
 
-    def __init__(self, dim, time_emb_dim=128, return_gate=False):
+    def __init__(self, dim, time_emb_dim=256, return_gate=False):
         super().__init__()
 
         self.return_gate = return_gate
@@ -55,8 +53,8 @@ class AdaLN(nn.Module):
         self.norm = nn.LayerNorm(dim, elementwise_affine=False)
 
         # Small-value initialization so block starts near-identity
-        # nn.init.constant_(self.time_mlp[-1].weight, 0.0)
-        # nn.init.constant_(self.time_mlp[-1].bias, 0.0)  # bias can stay at 0
+        nn.init.constant_(self.time_mlp[-1].weight, 0.0)
+        nn.init.constant_(self.time_mlp[-1].bias, 0.0)  # bias can stay at 0
 
     def __repr__(self):
         return f"AdaLN(dim={self.norm.normalized_shape[0]}, return_gate={self.return_gate})"
@@ -143,10 +141,10 @@ class MagSplitModel(BaseModel):
                 ),
                 GatedResidual(
                     AdaLN(dim, return_gate=True),
-                    nn.Linear(dim, dim * 4),
+                    nn.Linear(dim, dim * 2),
                     nn.GELU(),
                     nn.Dropout(dropout),
-                    nn.Linear(dim * 4, dim),
+                    nn.Linear(dim * 2, dim),
                     nn.Dropout(dropout),
                 ),
             ),
@@ -183,10 +181,10 @@ class MagSplitModel(BaseModel):
                 ),
                 Residual(
                     nn.LayerNorm(dim),
-                    nn.Linear(dim, dim * 4),
+                    nn.Linear(dim, dim * 2),
                     nn.GELU(),
                     nn.Dropout(dropout),
-                    nn.Linear(dim * 4, dim),
+                    nn.Linear(dim * 2, dim),
                     nn.Dropout(dropout),
                 ),
             ),
@@ -198,9 +196,9 @@ class MagSplitModel(BaseModel):
             stride=(8, 1),
             output_channels=shape.c,
             post_downsample_fn=lambda shape: Seq(
-                Rearrange("b c f t -> b c t f"),
-                AdaLN(shape.f),
-                Rearrange("b c t f -> b c f t"),
+                # Rearrange("b c f t -> b c t f"),
+                # AdaLN(shape.f),
+                # Rearrange("b c t f -> b c f t"),
             ),
             bottleneck_fn=lambda shape: Seq(
                 # Repeat(
@@ -209,9 +207,9 @@ class MagSplitModel(BaseModel):
                 # ),
             ),
             post_upsample_fn=lambda shape: Seq(
-                Rearrange("b c f t -> b c t f"),
-                AdaLN(shape.f),
-                Rearrange("b c t f -> b c f t", c=shape.c),
+                # Rearrange("b c f t -> b c t f"),
+                # AdaLN(shape.f),
+                # Rearrange("b c t f -> b c f t", c=shape.c),
             ),
             post_skip_fn=lambda shape: Seq(
                 Rearrange("b c f t -> b c t f"),
@@ -226,47 +224,12 @@ class MagSplitModel(BaseModel):
             WithShape(
                 shape=CFTShape(c=8, f=n_fft // 2, t=87),
                 fn=lambda shape: Seq(
-                    # nn.Conv2d(shape.c, shape.c, kernel_size=31, padding="same"),
-                    # nn.GELU(),
 
                     # Rearrange("b c f t -> b c t f"),
                     # AdaLN(shape.f),
                     # Rearrange("b c t f -> b c f t", c=shape.c),
 
-                    # Rearrange("b c f t -> b 1 (f c) t"),
-                    # Seq(
-                    #     self.unet(replace(shape, c=1, f=shape.f * shape.c)),
-                    # ),
-                    # Rearrange("b 1 (f c) t -> b c f t", c=8),
-                    # ComplexMask(
-                    #     self.unet(shape),
-                    #     nn.Tanh()
-                    # ),
-                    # Repeat(6,
-                    #        Residual(
-                    #            self.unet(shape)
-                    #        ),
-                    #        ),
-                    #     )
-                    # ),
-
-                    # Rearrange("b c f t -> b c t f"),
-                    # AdaLN(shape.f),
-                    # Rearrange("b c t f -> b c f t"),
-                    # ToMagnitudeAndInverse(
-                    #     shape=shape,
-                    #     fn=lambda shape: Seq(
-                    #         self.unet(shape),
-                    #     )
-                    # ),
-
-                    # Rearrange("b c f t -> b c t f"),
-                    # AdaLN(shape.f),
-                    # Rearrange("b c t f -> b c f t"),
-                    # Rearrange("b c f t -> b c t f"),
-                    # AdaLN(shape.f),
-                    # ComplexMask(nn.Linear(shape.f, shape.f)),
-                    # Rearrange("b c t f -> b c f t"),
+                    # self.unet(shape),
 
                     Rearrange("b c f t -> b 1 (f c) t"),
                     Bandsplit(
@@ -279,8 +242,9 @@ class MagSplitModel(BaseModel):
                             Rearrange("b c t f -> b c f t"),
 
                             Repeat(
-                                6,
-                                self.dit(embed_dim, "(b c) t f"),
+                                1,
+                                self.rwkv(embed_dim, "(b c) t f"),
+                                # self.rwkv(embed_dim, "(b t) c f"),
                             ),
 
                             Rearrange("b c f t -> b c t f"),
@@ -300,5 +264,5 @@ class MagSplitModel(BaseModel):
         x = torch.cat([x, mixture], dim=1)
         # 'mixture' is still passed here, but AdaLN will ignore it via **kwargs
         x = self.model(x, t=t, mixture=mixture)
-        # x = x[:, :4, :, :]
+        # x = x[:, :2, :, :]
         return x

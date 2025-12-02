@@ -65,6 +65,12 @@ class BaseModel(nn.Module, ABC):
             ToSTFT(),
             ToMagnitude(),
         ))(separated)
+        self.visualize("target_mag", Seq(
+            Rearrange("b n c t -> (b n) c t"),
+            ToSTFT(),
+            ToMagnitude(),
+        ))(targets)
+
         self.visualize("progress_stft", Seq(
             Rearrange("b n c t -> (b n) c t"),
             ToSTFT(),
@@ -73,11 +79,6 @@ class BaseModel(nn.Module, ABC):
             ToSTFT(),
             ToMagnitude(),
         ))(mixture)
-        self.visualize("target_mag", Seq(
-            Rearrange("b n c t -> (b n) c t"),
-            ToSTFT(),
-            ToMagnitude(),
-        ))(targets)
         self.visualize("mixture_stft", Seq(
             ToSTFT(),
         ))(mixture)
