@@ -574,12 +574,12 @@ class ComplexMask(nn.Module):
 
     def forward(self, x, **kwargs):
         b, c, f, t = x.shape
-        x_complex = torch.view_as_complex(
-            rearrange(x.float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
-        )
         mask_out = self.fn(x, **kwargs)
         mask_complex = torch.view_as_complex(
-            rearrange(mask_out.float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
+            rearrange(mask_out[:, :4, :, :].float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
+        )
+        x_complex = torch.view_as_complex(
+            rearrange(x[:, :4, :, :].float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
         )
         result_complex = x_complex * mask_complex
         result_real = torch.view_as_real(result_complex)

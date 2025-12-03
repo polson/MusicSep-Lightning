@@ -26,7 +26,7 @@ class ChirpDataset(IterableDataset):
         t = np.linspace(0, self.chunk_length / self.sample_rate, self.chunk_length, dtype=np.float32)
 
         # Chirp from 20Hz to 8000Hz
-        f0, f1 = 20.0, 8000.0
+        f0, f1 = 20.0, 20000.0
         chirp = np.sin(2 * np.pi * (f0 * t + (f1 - f0) * t ** 2 / (2 * self.chunk_length / self.sample_rate)))
         chirp = chirp.astype(np.float32) * 0.5  # Scale to avoid clipping
 

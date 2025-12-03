@@ -3,7 +3,7 @@ mode: train
 
 # Training settings
 training:
-  batch_size: 128
+  batch_size: 24
   duration: 1
   num_steps: 1000
   max_epochs: 1000
@@ -32,7 +32,7 @@ training:
 
 model:
   type: "MagSep"
-  n_fft: 1024
+  n_fft: 2048
   hop_length: 512
   layers: 1
   splits: 32
@@ -58,10 +58,10 @@ paths:
 # Logging and debugging
 logging:
   wandb:
-    enabled: true
+    enabled: false
     save_code: true # Uploads all code in the model directory to wandb
   validate_every: 0 # Validation loss / sdr metric interval (0 to disable)
-  debug_every: 1 # Debug visualization interval (0 to disable)
+  debug_every: 0 # Debug visualization interval (0 to disable)
   debug_steps: 1
 
 inference:
