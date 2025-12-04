@@ -91,7 +91,7 @@ def create_trainer():
         accumulate_grad_batches=config.training.grad_accum,
         num_sanity_val_steps=0,
         gradient_clip_val=config.training.grad_clip,
-        limit_val_batches=config.validation_steps
+        limit_val_batches=config.training.validation_steps
     )
 
 

@@ -5,7 +5,7 @@ mode: train
 training:
   batch_size: 24
   duration: 1
-  num_steps: 1000
+  num_steps: 100
   max_epochs: 1000
   optimizer: prodigy
   learning_rate: 1
@@ -17,9 +17,11 @@ training:
   precision: bf16-mixed
   aligned: false
   augment: false
+  validation_steps: 2
 
 #Model specific settings
 #Type can be: BSRoformer, MagSep
+
 #model:
 #  type: "BSRoformer"
 #  n_fft: 2048
@@ -44,13 +46,13 @@ paths:
   checkpoints: "/media/phil/Big/AudioSep/checkpoints"
 
   # Dataset location
-  dataset: "/media/phil/E65864AD58647DE5/AudioSep/overfit"
+  dataset: "/media/phil/E65864AD58647DE5/AudioSep/combined"
 
   # Optional: Where to save validation outputs for listening
   validation: "/home/phil/AudioSep/validation"
 
   # Optional: Resume training or inference from a checkpoint
-  #  resume_from: "/media/phil/Big/AudioSep/checkpoints/last-v135.ckpt"
+  #  resume_from: "/media/phil/Big/AudioSep/checkpoints/last-v172.ckpt"
 
   # Optional: Inference mode input folder, this must be used with resume_from option
   # inference_input: "/home/user/AudioSep/datasets/musdb18hq_flac/test"
@@ -60,12 +62,12 @@ logging:
   wandb:
     enabled: false
     save_code: true # Uploads all code in the model directory to wandb
-  validate_every: 0 # Validation loss / sdr metric interval (0 to disable)
+  validate_every: 10 # Validation loss / sdr metric interval (0 to disable)
   debug_every: 0 # Debug visualization interval (0 to disable)
   debug_steps: 1
 
 inference:
   batch_size: 1
-  duration: 8
-  steps: 35
+  duration: 10
+  steps: 10
 

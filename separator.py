@@ -38,7 +38,7 @@ class Separator:
         for chunk in chunks:
             chunk = chunk.to(model.device)
             with torch.no_grad():
-                output = model.iterative_inference(chunk, steps=self.steps)
+                output = model.inference(chunk, steps=self.steps)
             processed_chunks.append(output)
 
         recombined = self._overlap_add_chunks(
@@ -90,6 +90,7 @@ class Separator:
     ) -> torch.Tensor:
         step_size = self.chunk_size - self.overlap_size
         combined_chunks = torch.cat(chunks, dim=0)
+        combined_chunks = rearrange(combined_chunks, "b (n c) t -> b n c t", n=len(self.target_sources))
 
         padded_output_length = original_waveform_length + 2 * step_size
 

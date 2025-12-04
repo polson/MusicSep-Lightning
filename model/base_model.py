@@ -1,3 +1,4 @@
+import enum
 from abc import ABC, abstractmethod
 
 import torch
@@ -8,6 +9,11 @@ from loss import LossFactory, LossType
 from modules.functional import ToSTFT, Condition, ToMagnitude, SideEffect
 from modules.seq import Seq
 from modules.visualize import VisualizationHook
+
+
+class SeparationMode(enum.Enum):
+    ONE_SHOT = "one_shot"
+    FLOW_MATCHING = "flow_matching"
 
 
 class BaseModel(nn.Module, ABC):
@@ -29,8 +35,18 @@ class BaseModel(nn.Module, ABC):
         self.loss_factory = LossFactory.create(LossType.MULTI_STFT)
 
     @abstractmethod
-    def process(self, x, mixture=None, t=None):
+    def get_mode(self):
         pass
+
+    @abstractmethod
+    def process(self, x, mixture, t):
+        pass
+
+    def encode(self, waveform: torch.Tensor) -> torch.Tensor:
+        return self.stft(waveform)
+
+    def decode(self, encoded: torch.Tensor, original_length: int = None) -> torch.Tensor:
+        return self.inverse_stft(encoded, original_length)
 
     def loss(self, x, targets, mixture):
         return self.loss_factory.calculate(x, targets)

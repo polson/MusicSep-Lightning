@@ -3,42 +3,19 @@ from dataclasses import replace
 import numpy as np
 import torch
 import torch.nn as nn
-from einops import rearrange
 from einops.layers.torch import Rearrange
 
-from model.base_model import BaseModel
+from loss import LossFactory, LossType
+from model.base_model import BaseModel, SeparationMode
 from modules.functional import STFTAndInverse, Residual, ReshapeBCFT, Repeat, \
-    Mask, SplitNTensor, RepeatWithArgs, ToMagnitudeAndInverse, ComplexMask
+    SplitNTensor, RepeatWithArgs, ComplexMask
 from modules.self_attention import SelfAttention
 from modules.seq import Seq
-
-
-class TimeConditionedLayer(nn.Module):
-    """Injects FiLM conditioning from t kwarg passed through Seq."""
-
-    def __init__(self, dim):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(1, dim),
-            nn.SiLU(),
-            nn.Linear(dim, dim * 2),
-        )
-
-    def forward(self, x, t=None, **kwargs):
-        if t is None:
-            return x
-        # x: (b, num_splits, embed_dim, t_frames)
-        params = self.net(t.unsqueeze(-1))  # (b, dim*2)
-        scale, shift = params.chunk(2, dim=-1)
-        scale = rearrange(scale, 'b f -> b 1 f 1') + 1
-        shift = rearrange(shift, 'b f -> b 1 f 1')
-        return x * scale + shift
 
 
 class BSRoformer(BaseModel):
 
     def __init__(self,
-                 num_instruments=1,
                  n_fft=2048,
                  hop_length=512,
                  layers=1,
@@ -49,16 +26,15 @@ class BSRoformer(BaseModel):
                  ):
         super().__init__()
 
-        self.num_instruments = num_instruments
-
-        # Time conditioning layer (no parent reference needed)
-        self.time_cond = TimeConditionedLayer(embed_dim)
+        self.num_instruments = 1
 
         # Convert the original bs roformer freq band configuration
         scale_factor = (n_fft * 2) / sum(freqs_per_bands)
         freqs_per_bands_scaled = [int(x * scale_factor) for x in freqs_per_bands]
         freqs_per_bands_cumsum = np.cumsum(freqs_per_bands_scaled).tolist()
         num_splits = len(freqs_per_bands_scaled)
+
+        self.loss_factory = LossFactory.create(LossType.MULTI_STFT)
 
         self.transformer = lambda dim: Seq(
             Residual(
@@ -124,9 +100,6 @@ class BSRoformer(BaseModel):
                         concat_dim=1
                     ),
 
-                    # Inject time conditioning here (t comes from kwargs)
-                    self.time_cond,
-
                     # Transformer layers
                     Repeat(
                         layers,
@@ -156,18 +129,17 @@ class BSRoformer(BaseModel):
             )
         )
 
-    def process(self, x, t=None):
-        # x: (b, n, c, samples) for blended input, (b, c, samples) for mixture
-        if x.dim() == 4:
-            b, n, c, samples = x.shape
-            x = rearrange(x, 'b n c t -> (b n) c t')
-            t = t.repeat_interleave(n) if t is not None else None
-        else:
-            b = x.shape[0]
-            n = self.num_instruments
+    def get_mode(self):
+        return SeparationMode.ONE_SHOT
 
-        # Pass t as kwarg - Seq will propagate it through
-        x = self.model(x, t=t)
+    def encode(self, waveform: torch.Tensor) -> torch.Tensor:
+        return waveform
 
-        x = rearrange(x, '(b n) c t -> b n c t', b=b, n=n)
+    def decode(self, encoded: torch.Tensor, original_length: int = None) -> torch.Tensor:
+        return encoded
+
+    # TODO: fail before processing if we are trying to separate more than one instrument
+    def process(self, x, mixture, t):
+        b = x.shape[0]
+        x = self.model(x)
         return x

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
-from modules.functional import STFT, ToMagnitude, FFT2d, ToSTFT
+from modules.functional import STFT, ToMagnitude, FFT2d, ToSTFT, DebugShape, Condition
 from modules.seq import Seq
 
 
@@ -39,12 +39,14 @@ class StftRmseLoss(LossInterface, nn.Module):
     def __init__(self):
         super().__init__()
         self.stft = Seq(
-            Rearrange("b n c t -> (b n) c t"),
-            ToSTFT(),
+            Condition(
+                condition=lambda x: x.ndim == 3,
+                true_fn=lambda: ToSTFT()
+            )
         )
 
     def calculate(self, prediction, target):
-        loss = F.mse_loss(prediction, target)
+        loss = F.mse_loss(prediction, target).sqrt()
         return loss * 1000
 
 
@@ -61,7 +63,10 @@ class MultiStftLoss(LossInterface, nn.Module):
 
         for n_fft, hop in zip(fft_sizes, hop_sizes):
             layer = Seq(
-                Rearrange("b n c t -> (b n) c t"),
+                Condition(
+                    condition=lambda x: x.ndim == 4,
+                    true_fn=lambda: Rearrange("b n c t -> (b n) c t"),
+                ),
                 ToSTFT(n_fft=n_fft, hop_length=hop)
             )
             self.stft_losses.append(layer)

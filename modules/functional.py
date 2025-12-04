@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, replace
 from typing import List, Callable
 
@@ -575,11 +576,16 @@ class ComplexMask(nn.Module):
     def forward(self, x, **kwargs):
         b, c, f, t = x.shape
         mask_out = self.fn(x, **kwargs)
+
+        # Repeat x to match mask_out channels
+        num_repeats = mask_out.shape[1] // c
+        x_repeated = x.repeat(1, num_repeats, 1, 1)
+
         mask_complex = torch.view_as_complex(
-            rearrange(mask_out[:, :4, :, :].float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
+            rearrange(mask_out.float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
         )
         x_complex = torch.view_as_complex(
-            rearrange(x[:, :4, :, :].float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
+            rearrange(x_repeated.float(), 'b (ch ri) f t -> b ch f t ri', ri=2).contiguous()
         )
         result_complex = x_complex * mask_complex
         result_real = torch.view_as_real(result_complex)
@@ -664,6 +670,7 @@ class STFTAndInverse(nn.Module):
         )
         self.fn = fn(out_shape)
         self.stft = ToSTFT(n_fft=n_fft, hop_length=hop_length)
+        self.inverse_stft = InverseSTFT(n_fft=n_fft, hop_length=hop_length)
 
     def __repr__(self):
         return f"STFTAndInverse(in_channels={self.in_channels}, in_samples={self.in_samples}, out_f={self.out_f}, hop_length={self.hop_length}, fn={self.fn})"
@@ -674,19 +681,15 @@ class STFTAndInverse(nn.Module):
                 f"Input tensor has {x.shape[1]} channels, but model expects {self.in_channels} channels"
             )
         original_length = x.shape[-1]
-        x = self.stft(x.float())
+        x = self.stft(x)
         x = self.fn(x, **kwargs)
-        nyquist_bin = torch.zeros_like(x[:, :, :1, :])
-        x = torch.cat([x, nyquist_bin], dim=2)
-        x = self.stft.inverse(x, original_length)
+        x = self.inverse_stft(x, original_length)
         return x
 
 
 class ToSTFT(nn.Module):
-    def __init__(self, in_channels=2, in_samples=44100, n_fft=2048, hop_length=512):
+    def __init__(self, n_fft=2048, hop_length=512):
         super().__init__()
-        self.in_channels = in_channels
-        self.in_samples = in_samples
         self.out_f = n_fft // 2
         self.hop_length = hop_length
         self.stft = STFT(n_fft=n_fft, hop_length=hop_length)
@@ -695,12 +698,7 @@ class ToSTFT(nn.Module):
         return f"STFTOnly(in_channels={self.in_channels}, in_samples={self.in_samples}, out_f={self.out_f}, hop_length={self.hop_length})"
 
     def forward(self, x, **kwargs):
-        if x.shape[1] != self.in_channels:
-            raise ValueError(
-                f"Input tensor has {x.shape[1]} channels, but model expects {self.in_channels} channels"
-            )
         x = self.stft(x.float())
-        x = x[:, :, :-1, :]
         return x
 
 
@@ -720,8 +718,6 @@ class InverseSTFT(nn.Module):
     def forward(self, x, length=None, **kwargs):
         # x shape: (batch, channels*2, freq, time) - complex as real/imag channels
         target_length = length if length is not None else self.out_samples
-        nyquist_bin = torch.zeros_like(x[:, :, :1, :])
-        x = torch.cat([x, nyquist_bin], dim=2)
         x = self.stft.inverse(x, target_length)
         return x
 
@@ -966,7 +962,7 @@ class ToMagnitudeAndInverse(nn.Module):
         return f"ToMagnitudeAndInverse(shape={self.shape}, fn={self.fn}, eps={self.eps}, retain_phase={self.retain_phase})"
 
     def forward(self, x, **kwargs):
-        magnitude = self.to_mag(x, **kwargs)
+        magnitude = self.to_mag(x[:, :4, :, :], **kwargs)
         processed_magnitude = self.fn(magnitude, **kwargs)
         return self.from_mag(processed_magnitude, x, **kwargs)
 

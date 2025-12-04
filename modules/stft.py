@@ -15,6 +15,7 @@ class STFT(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, t = x.shape
         original_dtype = x.dtype
+        x = x.float()
         x = rearrange(x, 'b c t -> (b c) t')
         x = torch.stft(
             x,
@@ -29,14 +30,16 @@ class STFT(nn.Module):
         x = torch.view_as_real(x)
         x = rearrange(x, '(b c) f t_prime two -> b (c two) f t_prime', b=b, c=c)
         x = x.to(original_dtype)
+        x = x[:, :, :-1, :]
         return x
 
     def inverse(self, x: torch.Tensor, length: int | None = None) -> torch.Tensor:
+        nyquist_bin = torch.zeros_like(x[:, :, :1, :])
+        x = torch.cat([x, nyquist_bin], dim=2)
         b, c_times_two, f, t_prime = x.shape
         c = c_times_two // 2
         x = rearrange(x, 'b (c two) f t_p -> (b c) f t_p two', c=c, two=2, t_p=t_prime)
-        x = x.contiguous()
-        x = x.to(torch.float32)
+        x = x.contiguous().float()
         x = torch.view_as_complex(x)
         window_float32 = self.window.to(dtype=torch.float32, device=x.device)
         x = torch.istft(
