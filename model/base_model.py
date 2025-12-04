@@ -32,6 +32,8 @@ class BaseModel(nn.Module, ABC):
             ),
         )
 
+        self.stft = ToSTFT()
+
     @abstractmethod
     def get_mode(self):
         pass
@@ -74,25 +76,25 @@ class BaseModel(nn.Module, ABC):
             separated: Model's separated output from iterative_inference (b, n, c, t)
             targets: Ground truth targets (b, n, c, t)
         """
+
+        if mixture.ndim == 3:
+            mixture = self.stft(mixture)
+
+        if separated.ndim == 3:
+            separated = self.stft(separated)
+
+        if targets.ndim == 3:
+            targets = self.stft(targets)
+
         self.visualize("progress_mag", Seq(
-            ToSTFT(),
             ToMagnitude(),
         ))(separated)
         self.visualize("target_mag", Seq(
-            ToSTFT(),
             ToMagnitude(),
         ))(targets)
 
         self.visualize("progress_stft", Seq(
-            ToSTFT(),
         ))(separated)
         self.visualize("mixture_mag", Seq(
-            ToSTFT(),
             ToMagnitude(),
         ))(mixture)
-        self.visualize("mixture_stft", Seq(
-            ToSTFT(),
-        ))(mixture)
-        self.visualize("target_stft", Seq(
-            ToSTFT(),
-        ))(targets)

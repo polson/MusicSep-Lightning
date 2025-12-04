@@ -14,6 +14,7 @@ from dataset.validation_dataset import TestSongDataset
 from model.base_model import SeparationMode
 from model.bs_roformer.model import BSRoformer
 from model.magsep.model import MagSplitModel
+from model.vae.vae import VAEModel
 from modules.functional import ToMagnitude, FromMagnitude, DebugShape
 from modules.seq import Seq
 from modules.stft import STFT
@@ -67,9 +68,7 @@ class AudioSourceSeparation(L.LightningModule):
         model_type = config.model.type
 
         if model_type == "MagSep":
-            return MagSplitModel(
-                config=config
-            )
+            return MagSplitModel(config=config)
         elif model_type == "BSRoformer":
             return BSRoformer(
                 n_fft=config.model.n_fft,
@@ -80,6 +79,8 @@ class AudioSourceSeparation(L.LightningModule):
                 embed_dim=config.model.embed_dim,
                 freqs_per_bands=config.model.freqs_per_bands,
             )
+        elif model_type == "VAE":
+            return VAEModel(config=config)
         else:
             raise ValueError(
                 f"Unknown model type: '{model_type}'. "

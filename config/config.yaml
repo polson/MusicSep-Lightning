@@ -3,9 +3,9 @@ mode: train
 
 # Training settings
 training:
-  batch_size: 24
-  duration: 1
-  num_steps: 100
+  batch_size: 8
+  duration: 8
+  num_steps: 10000
   max_epochs: 1000
   optimizer: prodigy
   learning_rate: 1
@@ -13,7 +13,7 @@ training:
   grad_accum: 1
   grad_clip: 1.0
   target_sources:
-    - vocals
+    - mixture
   precision: bf16-mixed
   aligned: false
   augment: false
@@ -22,15 +22,15 @@ training:
 #Model specific settings
 #Type can be: BSRoformer, MagSep
 
-model:
-  type: "BSRoformer"
-  n_fft: 2048
-  hop_length: 512
-  layers: 1
-  mask_layers: 1
-  dropout: 0.1
-  embed_dim: 64
-  freqs_per_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 128 ]
+#model:
+#  type: "BSRoformer"
+#  n_fft: 2048
+#  hop_length: 512
+#  layers: 1
+#  mask_layers: 1
+#  dropout: 0.1
+#  embed_dim: 64
+#  freqs_per_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 128 ]
 
 #model:
 #  type: "MagSep"
@@ -45,6 +45,15 @@ model:
 #  hop_length: 512
 #  layers: 1
 #  splits: 32
+
+model:
+  type: "VAE"
+  n_fft: 2048
+  hop_length: 512
+  layers: 1
+  splits: 32
+  latent_channels: 64
+  kl_weight: 1e-4
 
 
 # Paths for different modes

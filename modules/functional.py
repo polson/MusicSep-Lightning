@@ -695,7 +695,7 @@ class ToSTFT(nn.Module):
         self.stft = STFT(n_fft=n_fft, hop_length=hop_length)
 
     def __repr__(self):
-        return f"STFTOnly(in_channels={self.in_channels}, in_samples={self.in_samples}, out_f={self.out_f}, hop_length={self.hop_length})"
+        return f"ToSTFT(out_f={self.out_f}, hop_length={self.hop_length})"
 
     def forward(self, x, **kwargs):
         x = self.stft(x.float())
@@ -703,17 +703,14 @@ class ToSTFT(nn.Module):
 
 
 class InverseSTFT(nn.Module):
-    def __init__(self, in_channels=2, out_samples=44100, n_fft=2048, hop_length=512):
+    def __init__(self, n_fft=2048, hop_length=512):
         super().__init__()
-        self.in_channels = in_channels
-        self.out_samples = out_samples
-        self.in_f = n_fft // 2 + 1
         self.hop_length = hop_length
         self.n_fft = n_fft
         self.stft = STFT(n_fft=n_fft, hop_length=hop_length)
 
     def __repr__(self):
-        return f"InverseSTFT(in_channels={self.in_channels}, out_samples={self.out_samples}, in_f={self.in_f}, hop_length={self.hop_length})"
+        return f"InverseSTFT(n_fft={self.n_fft}, hop_length={self.hop_length})"
 
     def forward(self, x, length=None, **kwargs):
         # x shape: (batch, channels*2, freq, time) - complex as real/imag channels

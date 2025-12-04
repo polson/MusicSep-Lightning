@@ -6,7 +6,7 @@ from loss import LossFactory, LossType
 from model.base_model import BaseModel, SeparationMode
 from model.magsep.rwkv import BiRWKVLayer
 from modules.functional import ReshapeBCFT, WithShape, CFTShape, Residual, Repeat, ComplexMask, ToSTFT, InverseSTFT, \
-    Mask, DebugShape
+    Mask, DebugShape, Bandsplit
 from modules.seq import Seq
 from modules.stft import STFT
 from modules.unet import UNet
@@ -28,11 +28,10 @@ class MagSplitModel(BaseModel):
             ReshapeBCFT(
                 reshape,
                 Residual(
-                    nn.RMSNorm(dim),
+                    nn.LayerNorm(dim),
                     BiRWKVLayer(dim),
                 ),
                 Residual(
-                    nn.RMSNorm(dim),
                     nn.Linear(dim, dim * 2),
                     nn.GELU(),
                     nn.Dropout(dropout),
@@ -44,34 +43,31 @@ class MagSplitModel(BaseModel):
 
         self.unet = lambda shape: UNet(
             input_shape=shape,
-            channels=[shape.c, 128, 256],
-            stride=(2, 2),
-            output_channels=shape.c,
+            channels=[shape.c, 32, 64, 128, 256],
+            stride=(2, 1),
+            output_channels=shape.c * self.num_instruments,
             post_downsample_fn=lambda shape: Seq(
-
             ),
             bottleneck_fn=lambda shape: Seq(
-                # Repeat(
-                #     1,
-                #     self.rwkv(shape.f, "(b c) t f")
-                # ),
             ),
             post_upsample_fn=lambda shape: Seq(
             ),
             post_skip_fn=lambda shape: Seq(
-                # Repeat(
-                #     1,
-                #     self.rwkv(shape.f, "(b c) t f")
-                # ),
             )
         )
 
-        self.model = ComplexMask(
+        self.model = Seq(
             WithShape(
                 shape=CFTShape(c=4, f=self.n_fft // 2, t=87),
                 fn=lambda shape: Seq(
-                    self.unet(shape=shape),
-                    nn.Tanh(),
+                    Bandsplit(
+                        shape=shape,
+                        num_splits=1,
+                        fn=lambda shape: Seq(
+                            self.unet(shape=shape),
+                        )
+                    ),
+                    self.visualize("mask")
                 ),
             ),
         )
