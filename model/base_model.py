@@ -23,7 +23,7 @@ class BaseModel(nn.Module, ABC):
         self.is_validating = False
 
         self.visualize = lambda name, transform=Seq(nn.Identity()): Condition(
-            condition=lambda x: True,
+            condition=lambda x: self.is_debug,
             true_fn=lambda: SideEffect(
                 Seq(
                     transform,
@@ -31,8 +31,6 @@ class BaseModel(nn.Module, ABC):
                 )
             ),
         )
-
-        self.loss_factory = LossFactory.create(LossType.MULTI_STFT)
 
     @abstractmethod
     def get_mode(self):
@@ -42,20 +40,21 @@ class BaseModel(nn.Module, ABC):
     def process(self, x, mixture, t):
         pass
 
+    @abstractmethod
+    def loss(self, pred, targets, mixture):
+        pass
+
     def encode(self, waveform: torch.Tensor) -> torch.Tensor:
-        return self.stft(waveform)
+        return waveform  # Identity by default
 
-    def decode(self, encoded: torch.Tensor, original_length: int = None) -> torch.Tensor:
-        return self.inverse_stft(encoded, original_length)
-
-    def loss(self, x, targets, mixture):
-        return self.loss_factory.calculate(x, targets)
+    def decode(self, encoded: torch.Tensor) -> torch.Tensor:
+        return encoded  # Identity by default
 
     def forward(self, x, mixture=None, targets=None, t=None):
         pred = self.process(x, mixture=mixture, t=t)
         loss = None
         if targets is not None:
-            loss = self.loss_factory.calculate(pred, targets)
+            loss = self.loss(pred, targets, mixture)
 
         return pred, loss
 
@@ -66,7 +65,7 @@ class BaseModel(nn.Module, ABC):
         self.is_validating = False
         return result
 
-    def debug_forward(self, mixture, separated, targets):
+    def visualize_debug(self, mixture, separated, targets):
         """
         Visualize debug outputs.
 
@@ -75,20 +74,16 @@ class BaseModel(nn.Module, ABC):
             separated: Model's separated output from iterative_inference (b, n, c, t)
             targets: Ground truth targets (b, n, c, t)
         """
-        self.is_debug = True
         self.visualize("progress_mag", Seq(
-            Rearrange("b n c t -> (b n) c t"),
             ToSTFT(),
             ToMagnitude(),
         ))(separated)
         self.visualize("target_mag", Seq(
-            Rearrange("b n c t -> (b n) c t"),
             ToSTFT(),
             ToMagnitude(),
         ))(targets)
 
         self.visualize("progress_stft", Seq(
-            Rearrange("b n c t -> (b n) c t"),
             ToSTFT(),
         ))(separated)
         self.visualize("mixture_mag", Seq(
@@ -99,8 +94,5 @@ class BaseModel(nn.Module, ABC):
             ToSTFT(),
         ))(mixture)
         self.visualize("target_stft", Seq(
-            Rearrange("b n c t -> (b n) c t"),
             ToSTFT(),
         ))(targets)
-
-        self.is_debug = False

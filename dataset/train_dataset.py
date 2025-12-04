@@ -40,7 +40,8 @@ class TrainDataset(IterableDataset):
             duration_seconds: float,
             targets: List[str],
             aligned_mixture: bool = False,
-            max_retries: int = 50
+            max_retries: int = 50,
+            augment=True,
     ):
         super().__init__()
         self.sample_rate = 44100
@@ -49,6 +50,7 @@ class TrainDataset(IterableDataset):
         self.targets = targets
         self.aligned_mixture = aligned_mixture
         self.max_retries = max_retries
+        self.augment = augment
 
         self.wav_groups = self._group_wavs_by_file_stem()
         self.song_groups = self._group_wavs_by_song()
@@ -127,14 +129,15 @@ class TrainDataset(IterableDataset):
                 if mixture is None:
                     continue
 
-                if self.augmentor.mixup.prob > 0.0:
-                    mixture2 = self._create_mixture()
-                    if mixture2 is not None:
-                        mixture = self.augmentor.augment(mixture, mixture2)
+                if self.augment:
+                    if self.augmentor.mixup.prob > 0.0:
+                        mixture2 = self._create_mixture()
+                        if mixture2 is not None:
+                            mixture = self.augmentor.augment(mixture, mixture2)
+                        else:
+                            mixture = self.augmentor.augment(mixture)
                     else:
                         mixture = self.augmentor.augment(mixture)
-                else:
-                    mixture = self.augmentor.augment(mixture)
 
                 mixture_audio, targets_tensor = self._get_mixture_and_targets_tensor(mixture)
                 yield mixture_audio, targets_tensor

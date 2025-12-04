@@ -132,14 +132,10 @@ class BSRoformer(BaseModel):
     def get_mode(self):
         return SeparationMode.ONE_SHOT
 
-    def encode(self, waveform: torch.Tensor) -> torch.Tensor:
-        return waveform
-
-    def decode(self, encoded: torch.Tensor, original_length: int = None) -> torch.Tensor:
-        return encoded
-
     # TODO: fail before processing if we are trying to separate more than one instrument
     def process(self, x, mixture, t):
-        b = x.shape[0]
         x = self.model(x)
         return x
+
+    def loss(self, pred, targets, mixture):
+        return self.loss_factory.calculate(pred, targets)

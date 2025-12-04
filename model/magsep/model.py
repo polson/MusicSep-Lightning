@@ -22,7 +22,7 @@ class MagSplitModel(BaseModel):
         self.num_instruments = len(config.training.target_sources)
         self.n_fft = config.model.n_fft
         self.hop_length = config.model.hop_length
-        self.loss_factory = LossFactory.create(LossType.STFT_RMSE)
+        self.loss_factory = LossFactory.create(LossType.MULTI_STFT)
 
         self.rwkv = lambda dim, reshape: Seq(
             ReshapeBCFT(
@@ -46,8 +46,9 @@ class MagSplitModel(BaseModel):
             input_shape=shape,
             channels=[shape.c, 128, 256],
             stride=(2, 2),
-            output_channels=8,
+            output_channels=shape.c,
             post_downsample_fn=lambda shape: Seq(
+
             ),
             bottleneck_fn=lambda shape: Seq(
                 # Repeat(
@@ -69,25 +70,29 @@ class MagSplitModel(BaseModel):
             WithShape(
                 shape=CFTShape(c=4, f=self.n_fft // 2, t=87),
                 fn=lambda shape: Seq(
-                    DebugShape("Before UNet"),
                     self.unet(shape=shape),
-                    DebugShape("After UNet"),
                     nn.Tanh(),
                 ),
             ),
         )
 
         self.stft = STFT(n_fft=self.n_fft, hop_length=self.hop_length)
+        self.original_length = None
 
     def get_mode(self):
         return SeparationMode.ONE_SHOT
 
     def encode(self, waveform: torch.Tensor) -> torch.Tensor:
+        self.original_length = waveform.shape[-1]
         return self.stft(waveform)
 
-    def decode(self, encoded: torch.Tensor, original_length: int = None) -> torch.Tensor:
-        print(f"Encoded shape in decode: {encoded.shape}")
-        return self.stft.inverse(encoded, original_length)
+    def decode(self, encoded: torch.Tensor) -> torch.Tensor:
+        return self.stft.inverse(encoded, self.original_length)
 
     def process(self, x, mixture, t):
         return self.model(x)
+
+    def loss(self, pred, targets, mixture):
+        pred = self.decode(pred)
+        targets = self.decode(targets)
+        return self.loss_factory.calculate(pred, targets)

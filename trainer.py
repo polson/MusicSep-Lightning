@@ -51,7 +51,8 @@ class AudioSourceSeparation(L.LightningModule):
                 root_dir=str(Path(self.config.paths.dataset) / "test"),
                 duration_seconds=config.training.duration,
                 targets=config.training.target_sources,
-                aligned_mixture=config.training.aligned
+                aligned_mixture=True,
+                augment=False
             )
         )
         self.debug_mixture = None
@@ -245,11 +246,10 @@ class AudioSourceSeparation(L.LightningModule):
     def _one_shot_inference(self, mixture: torch.Tensor) -> torch.Tensor:
         """Single forward pass inference for one-shot mode."""
         b, c, t_audio = mixture.shape
-        original_length = t_audio
 
         mixture_encoded = self.model.encode(mixture.float())
         predicted, loss = self.model(mixture_encoded, mixture=mixture_encoded, t=None)
-        x = self.model.decode(predicted, original_length)
+        x = self.model.decode(predicted)
         return x
 
     @torch.no_grad()
@@ -260,9 +260,6 @@ class AudioSourceSeparation(L.LightningModule):
             steps = self.inference_steps
         if noise_factor is None:
             noise_factor = self.noise_factor
-
-        b, c, t_audio = mixture.shape
-        original_length = t_audio
 
         mixture_encoded = self.model.encode(mixture.float())
 
@@ -286,7 +283,7 @@ class AudioSourceSeparation(L.LightningModule):
             # Pure Euler step
             x = x + predicted_velocity * dt
 
-        x = self.model.decode(x, original_length)
+        x = self.model.decode(x)
         x = rearrange(x, "(b n) c t -> b n c t", n=self.num_instruments)
 
         return x
@@ -304,8 +301,10 @@ class AudioSourceSeparation(L.LightningModule):
         if debug_every != 0 and self.global_step % debug_every == 0 and self.global_step != 0:
             self.model.eval()
             with torch.no_grad():
+                self.model.is_debug = True
                 debug_separated = self.inference(self.debug_mixture, steps=self.config.logging.debug_steps)
-                self.model.debug_forward(self.debug_mixture, debug_separated, self.debug_targets)
+                self.model.visualize_debug(self.debug_mixture, debug_separated, self.debug_targets)
+                self.model.is_debug = False
             self.model.train()
 
     def validation_loss_step(self):
@@ -345,7 +344,8 @@ class AudioSourceSeparation(L.LightningModule):
         train_dataset = TrainDataset(
             root_dir=str(Path(self.config.paths.dataset) / "train"),
             duration_seconds=self.config.training.duration,
-            targets=self.config.training.target_sources
+            targets=self.config.training.target_sources,
+            augment=self.config.training.augment
         )
         num_workers = 6
         return torch.utils.data.DataLoader(

@@ -22,22 +22,29 @@ training:
 #Model specific settings
 #Type can be: BSRoformer, MagSep
 
-#model:
-#  type: "BSRoformer"
-#  n_fft: 2048
-#  hop_length: 512
-#  layers: 1
-#  mask_layers: 1
-#  dropout: 0.1
-#  embed_dim: 64
-#  freqs_per_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 128 ]
-
 model:
-  type: "MagSep"
+  type: "BSRoformer"
   n_fft: 2048
   hop_length: 512
   layers: 1
-  splits: 32
+  mask_layers: 1
+  dropout: 0.1
+  embed_dim: 64
+  freqs_per_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 128 ]
+
+#model:
+#  type: "MagSep"
+#  n_fft: 2048
+#  hop_length: 512
+#  layers: 1
+#  splits: 32
+
+#model:
+#  type: "FlowSep"
+#  n_fft: 2048
+#  hop_length: 512
+#  layers: 1
+#  splits: 32
 
 
 # Paths for different modes
@@ -63,7 +70,7 @@ logging:
     enabled: false
     save_code: true # Uploads all code in the model directory to wandb
   validate_every: 10 # Validation loss / sdr metric interval (0 to disable)
-  debug_every: 0 # Debug visualization interval (0 to disable)
+  debug_every: 1 # Debug visualization interval (0 to disable)
   debug_steps: 1
 
 inference:

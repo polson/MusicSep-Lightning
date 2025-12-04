@@ -63,10 +63,6 @@ class MultiStftLoss(LossInterface, nn.Module):
 
         for n_fft, hop in zip(fft_sizes, hop_sizes):
             layer = Seq(
-                Condition(
-                    condition=lambda x: x.ndim == 4,
-                    true_fn=lambda: Rearrange("b n c t -> (b n) c t"),
-                ),
                 ToSTFT(n_fft=n_fft, hop_length=hop)
             )
             self.stft_losses.append(layer)
