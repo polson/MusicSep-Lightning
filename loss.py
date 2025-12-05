@@ -47,7 +47,7 @@ class StftRmseLoss(LossInterface, nn.Module):
 
     def calculate(self, prediction, target):
         loss = F.mse_loss(prediction, target).sqrt()
-        return loss * 1000
+        return loss
 
 
 class MultiStftLoss(LossInterface, nn.Module):
@@ -77,7 +77,7 @@ class MultiStftLoss(LossInterface, nn.Module):
             loss = F.mse_loss(p_stft, t_stft).sqrt()
             total_loss += loss
 
-        return (total_loss / len(self.stft_losses)) * 1000
+        return (total_loss / len(self.stft_losses))
 
 
 class MultiStftL1Loss(LossInterface, nn.Module):

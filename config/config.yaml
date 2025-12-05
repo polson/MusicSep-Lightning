@@ -3,8 +3,8 @@ mode: train
 
 # Training settings
 training:
-  batch_size: 8
-  duration: 8
+  batch_size: 24
+  duration: 1
   num_steps: 10000
   max_epochs: 1000
   optimizer: prodigy
@@ -16,7 +16,7 @@ training:
     - mixture
   precision: bf16-mixed
   aligned: false
-  augment: false
+  augment: true
   validation_steps: 2
 
 #Model specific settings
@@ -46,14 +46,22 @@ training:
 #  layers: 1
 #  splits: 32
 
+#model:
+#  type: "VAE"
+#  n_fft: 2048
+#  hop_length: 512
+#  layers: 1
+#  splits: 32
+#  latent_channels: 64
+#  kl_weight: 1e-4
+
 model:
-  type: "VAE"
+  type: "Autoencoder"
   n_fft: 2048
   hop_length: 512
   layers: 1
   splits: 32
   latent_channels: 64
-  kl_weight: 1e-4
 
 
 # Paths for different modes
@@ -68,7 +76,7 @@ paths:
   validation: "/home/phil/AudioSep/validation"
 
   # Optional: Resume training or inference from a checkpoint
-  #  resume_from: "/media/phil/Big/AudioSep/checkpoints/last-v172.ckpt"
+  #  resume_from: "/media/phil/Big/AudioSep/checkpoints/last-v211.ckpt"
 
   # Optional: Inference mode input folder, this must be used with resume_from option
   # inference_input: "/home/user/AudioSep/datasets/musdb18hq_flac/test"
@@ -76,7 +84,7 @@ paths:
 # Logging and debugging
 logging:
   wandb:
-    enabled: false
+    enabled: true
     save_code: true # Uploads all code in the model directory to wandb
   validate_every: 10 # Validation loss / sdr metric interval (0 to disable)
   debug_every: 1 # Debug visualization interval (0 to disable)

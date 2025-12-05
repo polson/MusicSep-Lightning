@@ -47,7 +47,7 @@ class DebugShape(nn.Module):
         x = self.fn(x, **kwargs)
         name_prefix = f"{self.name}: " if self.name else ""
         print(
-            f"{name_prefix}Shape: {x.shape}, Min: {x.min().item():.4f}, Max: {x.max().item():.4f}, Mean: {x.mean().item():.4f}")
+            f"{name_prefix}Shape: {x.shape}, Min: {x.min().item():.4f}, Max: {x.max().item():.4f}, Mean: {x.mean().item():.4f}, Std: {x.std().item():.4f}")
         return x
 
 

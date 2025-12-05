@@ -22,8 +22,8 @@ class BaseModel(nn.Module, ABC):
         self.is_debug = False
         self.is_validating = False
 
-        self.visualize = lambda name, transform=Seq(nn.Identity()): Condition(
-            condition=lambda x: self.is_debug,
+        self.visualize = lambda name, transform=Seq(nn.Identity()), force=False: Condition(
+            condition=lambda x: force or self.is_debug,
             true_fn=lambda: SideEffect(
                 Seq(
                     transform,

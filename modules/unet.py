@@ -80,7 +80,7 @@ class UNet(nn.Module):
                         kernel_size=self.stride,
                         stride=self.stride
                     ),
-                    nn.GELU(),
+                    nn.SiLU(),
                 ),
             )
             if self.post_downsample_modules is not None:
