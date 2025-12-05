@@ -4,7 +4,7 @@ mode: train
 # Training settings
 training:
   batch_size: 24
-  duration: 1
+  duration: 4
   num_steps: 10000
   max_epochs: 1000
   optimizer: prodigy

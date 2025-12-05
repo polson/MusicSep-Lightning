@@ -11,6 +11,7 @@ from dataset.ChirpDataset import ChirpDataset
 from dataset.inference_dataset import InferenceDataset
 from dataset.train_dataset import TrainDataset
 from dataset.validation_dataset import TestSongDataset
+from model.autoencoder.autoencoder import AutoencoderModel
 from model.base_model import SeparationMode
 from model.bs_roformer.model import BSRoformer
 from model.magsep.model import MagSplitModel
@@ -81,6 +82,8 @@ class AudioSourceSeparation(L.LightningModule):
             )
         elif model_type == "VAE":
             return VAEModel(config=config)
+        elif model_type == "Autoencoder":
+            return AutoencoderModel(config=config)
         else:
             raise ValueError(
                 f"Unknown model type: '{model_type}'. "
